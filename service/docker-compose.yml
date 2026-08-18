@@ -1,0 +1,31 @@
+# docker compose -f service/docker-compose.yml --env-file service/.env up
+
+services:
+  geometry:
+    build:
+      context: ..
+      dockerfile: service/Dockerfile
+    image: cad-geometry-service:latest
+    ports:
+      - "${SERVICE_PORT:-8000}:8000"
+    environment:
+      - POOL_SIZE=${POOL_SIZE:-4}
+      - JOB_TIMEOUT=${JOB_TIMEOUT:-20}
+      - WORKER_MEM_LIMIT_MB=${WORKER_MEM_LIMIT_MB:-2048}
+      - WORKER_CPU_LIMIT_S=${WORKER_CPU_LIMIT_S:-30}
+    deploy:
+      resources:
+        limits:
+          # container-level backstop -- the real safeguard, since the
+          # worker pool's RLIMIT_AS/RLIMIT_CPU are best-effort (see
+          # worker_pool.py docstring). Size this for POOL_SIZE workers
+          # each potentially using up to WORKER_MEM_LIMIT_MB.
+          cpus: "${SERVICE_CPU_LIMIT:-4}"
+          memory: ${SERVICE_MEM_LIMIT:-8g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

@@ -1,0 +1,104 @@
+# docker compose -f training/docker-compose.yml --env-file training/.env up train
+# docker compose -f training/docker-compose.yml --env-file training/.env run --rm merge
+
+services:
+  train:
+    build: .
+    image: cad-gemma4-trainer:latest
+    env_file: .env
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - MODEL_ID=${MODEL_ID:-google/gemma-4-E4B-it}
+      - TRAIN_FILE=/workspace/data/train.jsonl
+      - VAL_FILE=/workspace/data/val.jsonl
+      - OUTPUT_DIR=/workspace/outputs/adapter
+      - CAD_DATASET_PATH=/workspace/cad_dataset
+      - USE_QLORA=${USE_QLORA:-1}
+      - LORA_R=${LORA_R:-16}
+      - LORA_ALPHA=${LORA_ALPHA:-32}
+      - LORA_DROPOUT=${LORA_DROPOUT:-0.05}
+      - MAX_SEQ_LEN=${MAX_SEQ_LEN:-2048}
+      - BATCH_SIZE=${BATCH_SIZE:-2}
+      - GRAD_ACCUM=${GRAD_ACCUM:-8}
+      - LEARNING_RATE=${LEARNING_RATE:-2e-4}
+      - NUM_EPOCHS=${NUM_EPOCHS:-3}
+      - EVAL_STEPS=${EVAL_STEPS:-100}
+      - SAVE_STEPS=${SAVE_STEPS:-100}
+      - GEOMETRY_EVAL_SAMPLES=${GEOMETRY_EVAL_SAMPLES:-20}
+      - EMPTY_CACHE_EVERY_N_STEPS=${EMPTY_CACHE_EVERY_N_STEPS:-0}
+      - RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-}
+      - REPORT_TO=${REPORT_TO:-none}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+    volumes:
+      # dataset jsonl (produced by build_dataset.py) -- read-only
+      - ../out:/workspace/data:ro
+      # cad_dataset repo itself, so the geometry-eval callback can import
+      # schema.py / executor.py -- read-only
+      - ..:/workspace/cad_dataset:ro
+      # checkpoints/adapters written here, persisted on the host
+      - ./outputs:/workspace/outputs
+      # persist the HF model cache across container restarts (avoids
+      # re-downloading multi-GB weights every run)
+      - hf_cache:/root/.cache/huggingface
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: ["train.py"]
+
+  merge:
+    build: .
+    image: cad-gemma4-trainer:latest
+    env_file: .env
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - ./outputs:/workspace/outputs
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint: ["python", "merge_adapter.py"]
+    command:
+      - "--base-model=${MODEL_ID:-google/gemma-4-E4B-it}"
+      - "--adapter-dir=/workspace/outputs/adapter"
+      - "--output-dir=/workspace/outputs/merged"
+
+  compare:
+    build: .
+    image: cad-gemma4-trainer:latest
+    env_file: .env
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - CAD_DATASET_PATH=/workspace/cad_dataset
+    volumes:
+      - ../out:/workspace/data:ro
+      - ..:/workspace/cad_dataset:ro
+      - ./outputs:/workspace/outputs
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint: ["python", "compare_checkpoints.py"]
+    command:
+      - "--base-model=${MODEL_ID:-google/gemma-4-E4B-it}"
+      - "--old-adapter=${OLD_ADAPTER:-/workspace/outputs/adapter_old}"
+      - "--new-adapter=${NEW_ADAPTER:-/workspace/outputs/adapter}"
+      - "--eval-prompts=/workspace/data/val.jsonl"
+      - "--n-samples=${COMPARE_N_SAMPLES:-50}"
+
+volumes:
+  hf_cache:

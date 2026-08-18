@@ -1,0 +1,8 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+
+# real geometry kernel -- see cad_dataset/README.md verification section;
+# same caveat applies here: not installed/tested in the sandbox this repo
+# was authored in
+build123d

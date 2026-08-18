@@ -1,0 +1,84 @@
+# Run the full stack (llama.cpp + orchestrator) together with the geometry
+# service from ../service/docker-compose.yml:
+#   docker compose -p cad-stack \
+#     -f ../service/docker-compose.yml -f docker-compose.yml up
+# (same -p project name across both `-f` invocations makes them share one
+# Docker network, so "http://geometry:8000" and "http://llamacpp:8080"
+# resolve between containers -- see README.md if your compose version
+# doesn't like the combined invocation.)
+#
+# Or standalone (pointing GEOMETRY_SERVICE_URL at an already-running
+# geometry service elsewhere):
+#   docker compose --env-file .env up llamacpp llm-service
+
+services:
+  llamacpp:
+    # GPU image by default -- for CPU-only, override LLAMACPP_IMAGE to
+    # ghcr.io/ggml-org/llama.cpp:server, set N_GPU_LAYERS=0, and remove the
+    # deploy.resources block below.
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    environment:
+      - LLAMA_ARG_MODEL=/models/${GGUF_FILENAME:-model.gguf}
+      - LLAMA_ARG_N_GPU_LAYERS=${N_GPU_LAYERS:-999}
+      - LLAMA_ARG_CTX_SIZE=${CTX_SIZE:-4096}
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+    ports:
+      - "${LLAMACPP_PORT:-8080}:8080"
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s  # GGUF load time, can be long for larger models
+
+  llm-service:
+    build:
+      context: ..
+      dockerfile: llm-service/Dockerfile
+    image: llm-service:latest
+    environment:
+      - LLAMACPP_URL=http://llamacpp:8080
+      - GEOMETRY_SERVICE_URL=${GEOMETRY_SERVICE_URL:-http://geometry:8000}
+      - HTTP_TIMEOUT=${HTTP_TIMEOUT:-60}
+      - DB_PATH=/data/cad_sessions.db
+    ports:
+      - "${LLM_SERVICE_PORT:-8001}:8000"
+    volumes:
+      # persists project/version history across container restarts -- see
+      # app/store.py. A bind mount, not a named volume, so it's trivial to
+      # find/back up/inspect (sqlite3 ./data/cad_sessions.db) from the host.
+      - ./data:/data
+    depends_on:
+      llamacpp:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # On-demand GGUF conversion, NOT started by `docker compose up` (profile
+  # gate). Run explicitly once you have a merged HF model from
+  # ../training/merge_adapter.py:
+  #   docker compose --profile tools run --rm convert
+  # This was NOT executed/verified in the sandbox this repo was authored
+  # in -- confirm the convert script path and llama-quantize binary name
+  # inside whatever llama.cpp image tag you pull; these have moved before.
+  convert:
+    image: ${LLAMACPP_CONVERT_IMAGE:-ghcr.io/ggml-org/llama.cpp:full-cuda}
+    profiles: ["tools"]
+    volumes:
+      - ../training/outputs/merged:/input:ro
+      - ./models:/output
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        python3 convert_hf_to_gguf.py /input --outfile /output/model-f16.gguf --outtype f16 &&
+        ./llama-quantize /output/model-f16.gguf /output/${GGUF_FILENAME:-model.gguf} ${QUANT_TYPE:-Q4_K_M}

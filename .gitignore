@@ -1,0 +1,7 @@
+**/.env
+**/node_modules
+training/outputs/**
+out
+__pycache__
+llm-service/data
+llm-service/models

@@ -1,0 +1,225 @@
+"""
+orchestrator.py
+The self-correcting generate/repair loop:
+  1. render the user turn (chat_format.py -- same phrasing training used)
+  2. call llama.cpp's OpenAI-compatible /v1/chat/completions
+  3. parse the model's output as JSON IR
+  4. call the geometry service's /v1/compile to validate
+  5. on failure, feed the real error back as a repair turn
+     (chat_format.render_repair_user_turn -- the exact shape
+     gen_repair.py trained the model to handle) and retry
+  6. give up after max_attempts, returning the last error and IR attempt
+
+`generate_stream()` is the single implementation of this loop, an async
+generator yielding one newline-JSON-friendly event dict per step
+(attempt_start, llm_response, validating, attempt_failed, repairing,
+terminating in exactly one of success/failure). `generate()` is a thin
+wrapper that drains it for callers that only want the final answer -- see
+main.py for both a streaming (NDJSON) and buffered HTTP endpoint over the
+same underlying loop.
+
+Using chat_format.py here (not ad-hoc string building) is the entire
+reason that module exists: the wording the model sees at inference time
+must match what build_dataset.py rendered at training time, or you
+reintroduce exactly the kind of train/serve skew bug this project already
+hit once (the "model" vs "assistant" role mismatch).
+
+NOTE: not executed in the sandbox this was authored in -- no httpx
+installed there, no network to reach a real llama.cpp or geometry
+service. `extract_json()` (the one dependency-free piece) was smoke-
+tested standalone; the async HTTP flow was not. Test against a real
+llama.cpp + geometry service stack before trusting this in production.
+"""
+
+from __future__ import annotations
+import json
+import re
+from dataclasses import dataclass, field
+
+import httpx
+
+import chat_format
+
+
+def extract_json(text: str) -> dict | None:
+    """The model was trained to emit raw JSON with nothing else, but
+    sampling can still occasionally wrap it in markdown fences or add
+    stray text -- try increasingly permissive extraction before giving up."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+@dataclass
+class GenerateResult:
+    success: bool
+    json_ir: dict | None
+    attempts: int
+    stats: dict | None = None
+    error: str | None = None
+    conversation: list[dict] = field(default_factory=list)
+
+
+class Orchestrator:
+    def __init__(self, llama_url: str, geometry_url: str, http_timeout: float = 60.0):
+        self.llama_url = llama_url.rstrip("/")
+        self.geometry_url = geometry_url.rstrip("/")
+        self.http_timeout = http_timeout
+
+    async def _chat(self, client: httpx.AsyncClient, messages: list[dict]) -> str:
+        resp = await client.post(
+            f"{self.llama_url}/v1/chat/completions",
+            json={"messages": messages, "temperature": 0.0, "max_tokens": 2048},
+            timeout=self.http_timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+    async def _compile(self, client: httpx.AsyncClient, ir: dict) -> dict:
+        resp = await client.post(
+            f"{self.geometry_url}/v1/compile", json={"json_ir": ir}, timeout=self.http_timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def generate_stream(self, prompt: str, base_ir: dict | None = None,
+                               max_attempts: int = 3):
+        """Async generator yielding one event dict per step, e.g.:
+          {"event": "attempt_start", "attempt": 1, "max_attempts": 3}
+          {"event": "llm_response", "attempt": 1, "content": "..."}
+          {"event": "validating", "attempt": 1}
+          {"event": "attempt_failed", "attempt": 1, "error_type": "...", "error": "..."}
+          {"event": "repairing", "attempt": 1, "next_attempt": 2}
+          {"event": "success", "attempts": 2, "json_ir": {...}, "stats": {...}, "conversation": [...]}
+        Terminal event is always exactly one of "success" or "failure".
+        This is the single source of truth for the loop; generate() (the
+        non-streaming form) just drains this and returns the terminal
+        event, so there's one implementation, not two copies that can
+        drift apart."""
+        if base_ir is not None:
+            user_turn = chat_format.render_regenerate_user_turn(base_ir, prompt)
+        else:
+            user_turn = chat_format.render_generate_user_turn(prompt)
+
+        yield {"event": "start", "max_attempts": max_attempts}
+
+        messages = [{"role": "user", "content": user_turn}]
+        conversation = list(messages)
+        last_error: str | None = None
+        last_ir: dict | None = None
+
+        async with httpx.AsyncClient() as client:
+            for attempt in range(1, max_attempts + 1):
+                yield {"event": "attempt_start", "attempt": attempt, "max_attempts": max_attempts}
+
+                try:
+                    raw = await self._chat(client, messages)
+                except httpx.HTTPError as e:
+                    yield {"event": "failure", "attempts": attempt, "json_ir": last_ir,
+                           "error": f"llm request failed: {e}", "conversation": conversation}
+                    return
+
+                messages.append({"role": "assistant", "content": raw})
+                conversation.append({"role": "assistant", "content": raw})
+                yield {"event": "llm_response", "attempt": attempt, "content": raw}
+
+                ir = extract_json(raw)
+                if ir is None:
+                    last_error = "model output was not valid JSON"
+                    yield {"event": "attempt_failed", "attempt": attempt,
+                           "error_type": "ParseError", "error": last_error}
+                    repair_turn = (
+                        "Your last response was not valid JSON. Respond with ONLY "
+                        "the JSON feature tree, no other text.\n\n"
+                        f"Error: {last_error}"
+                    )
+                else:
+                    last_ir = ir
+                    yield {"event": "validating", "attempt": attempt}
+                    try:
+                        result = await self._compile(client, ir)
+                    except httpx.HTTPError as e:
+                        yield {"event": "failure", "attempts": attempt, "json_ir": ir,
+                               "error": f"geometry service request failed: {e}",
+                               "conversation": conversation}
+                        return
+                    if result.get("valid"):
+                        yield {"event": "success", "attempts": attempt, "json_ir": ir,
+                               "stats": result.get("stats"), "conversation": conversation}
+                        return
+                    last_error = result.get("error", "unknown validation error")
+                    yield {"event": "attempt_failed", "attempt": attempt,
+                           "error_type": result.get("error_type"), "error": last_error}
+                    repair_turn = chat_format.render_repair_user_turn(broken_ir=ir, error=last_error)
+
+                messages.append({"role": "user", "content": repair_turn})
+                conversation.append({"role": "user", "content": repair_turn})
+                if attempt < max_attempts:
+                    yield {"event": "repairing", "attempt": attempt, "next_attempt": attempt + 1}
+
+        yield {"event": "failure", "attempts": max_attempts, "json_ir": last_ir,
+               "error": last_error, "conversation": conversation}
+
+    async def generate(self, prompt: str, base_ir: dict | None = None,
+                        max_attempts: int = 3) -> GenerateResult:
+        """Non-streaming form: drains generate_stream() and returns just
+        the terminal outcome. Prefer generate_stream() directly (see
+        main.py's /v1/generate/stream) when the caller can show progress;
+        this exists for callers that just want the final answer."""
+        async for event in self.generate_stream(prompt, base_ir, max_attempts):
+            if event["event"] == "success":
+                return GenerateResult(True, event["json_ir"], event["attempts"],
+                                       stats=event.get("stats"),
+                                       conversation=event.get("conversation", []))
+            if event["event"] == "failure":
+                return GenerateResult(False, event.get("json_ir"), event["attempts"],
+                                       error=event.get("error"),
+                                       conversation=event.get("conversation", []))
+        # generate_stream() always yields exactly one terminal event -- if
+        # we get here, that invariant broke
+        return GenerateResult(False, None, max_attempts, error="generator produced no terminal event")
+
+    async def compile_only(self, ir: dict) -> dict:
+        """Direct validate-only call to the geometry service, bypassing
+        the model entirely. Used by the structured-editing fallback (Phase
+        2 item 4: a user edits a dimension directly in the feature tree,
+        not via a prompt) -- there's no generation loop here because
+        there's nothing to generate, just geometry to check."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.geometry_url}/v1/compile", json={"json_ir": ir},
+                timeout=self.http_timeout,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def export(self, ir: dict, fmt: str) -> tuple[bytes, str, dict] | None:
+        """Returns (file_bytes, content_type, stats) or None on failure."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.geometry_url}/v1/export", json={"json_ir": ir, "format": fmt},
+                timeout=self.http_timeout,
+            )
+        if resp.status_code != 200:
+            return None
+        stats = json.loads(resp.headers.get("X-Geometry-Stats", "{}"))
+        return resp.content, resp.headers.get("content-type", "application/octet-stream"), stats

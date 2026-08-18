@@ -1,0 +1,119 @@
+# Runs the whole application as one stack: geometry service, llama.cpp,
+# llm-service (orchestrator), frontend. One compose file, deliberately --
+# not `-f service/... -f llm-service/... -f frontend/...`, which the
+# per-directory READMEs previously documented as a fallback because
+# multi-file `-f` network-sharing behavior varies by compose version. A
+# single file has one default network by construction, no version
+# gambling required.
+#
+#   cp .env.example .env
+#   docker compose up --build
+#
+# NOT included here (deliberately): `training/` and llm-service's
+# `convert` profile. Those are one-off/offline batch jobs (build the
+# dataset, fine-tune, merge the adapter, convert to GGUF), not part of
+# the running application -- see their own directories. You need a GGUF
+# model in ./llm-service/models/ (produced by that offline pipeline)
+# before `llamacpp` can start; see llm-service/README.md.
+
+services:
+  geometry:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    image: cad-geometry-service:latest
+    ports:
+      - "${SERVICE_PORT:-8000}:8000"
+    environment:
+      - POOL_SIZE=${POOL_SIZE:-4}
+      - JOB_TIMEOUT=${JOB_TIMEOUT:-20}
+      - WORKER_MEM_LIMIT_MB=${WORKER_MEM_LIMIT_MB:-2048}
+      - WORKER_CPU_LIMIT_S=${WORKER_CPU_LIMIT_S:-30}
+    deploy:
+      resources:
+        limits:
+          # container-level backstop -- see service/worker_pool.py
+          # docstring for why the per-worker rlimits alone aren't enough.
+          # Size for POOL_SIZE workers each up to WORKER_MEM_LIMIT_MB.
+          cpus: "${SERVICE_CPU_LIMIT:-4}"
+          memory: ${SERVICE_MEM_LIMIT:-8g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  llamacpp:
+    # GPU image by default -- for CPU-only, override LLAMACPP_IMAGE to
+    # ghcr.io/ggml-org/llama.cpp:server, set N_GPU_LAYERS=0, and remove
+    # the deploy.resources block below.
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    environment:
+      - LLAMA_ARG_MODEL=/models/${GGUF_FILENAME:-model.gguf}
+      - LLAMA_ARG_N_GPU_LAYERS=${N_GPU_LAYERS:-999}
+      - LLAMA_ARG_CTX_SIZE=${CTX_SIZE:-4096}
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+    ports:
+      - "${LLAMACPP_PORT:-8080}:8080"
+    volumes:
+      - ./llm-service/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s  # GGUF load time, can be long for larger models
+
+  llm-service:
+    build:
+      context: .
+      dockerfile: llm-service/Dockerfile
+    image: llm-service:latest
+    environment:
+      - LLAMACPP_URL=http://llamacpp:8080
+      - GEOMETRY_SERVICE_URL=http://geometry:8000
+      - HTTP_TIMEOUT=${HTTP_TIMEOUT:-60}
+      - DB_PATH=/data/cad_sessions.db
+    ports:
+      - "${LLM_SERVICE_PORT:-8001}:8000"
+    volumes:
+      # persists project/version history + request log across restarts --
+      # see llm-service/app/store.py. Bind mount, not a named volume, so
+      # it's trivial to find/back up/inspect (sqlite3 ./llm-service/data/cad_sessions.db)
+      - ./llm-service/data:/data
+    depends_on:
+      llamacpp:
+        condition: service_healthy
+      geometry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Baked in at BUILD time (Vite inlines import.meta.env.*), and
+        # must be reachable from the BROWSER, not just other containers --
+        # "http://llm-service:8000" resolves for containers on this
+        # network, not for someone's browser tab. Default assumes you're
+        # hitting the host-mapped LLM_SERVICE_PORT from the same machine;
+        # override for a real deployment (your domain / reverse proxy).
+        VITE_LLM_SERVICE_URL: ${VITE_LLM_SERVICE_URL:-http://localhost:8001}
+    image: cad-frontend:latest
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - llm-service
+    restart: unless-stopped

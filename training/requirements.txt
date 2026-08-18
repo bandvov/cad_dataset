@@ -1,0 +1,45 @@
+# Core fine-tuning stack.
+# torch/torchvision/torchaudio are pinned to an EXACT, mutually-compatible
+# triple (per pytorch.org's official compatibility matrix), not left as a
+# floor (`torch>=...`). Leaving torchvision unpinned entirely (as this file
+# used to) is what causes "RuntimeError: operator torchvision::nms does not
+# exist" -- pip resolves torch to whatever satisfies the floor, the base
+# image's pre-baked torchvision (built against ITS torch version) no longer
+# matches the ABI, and torchvision fails to load. That failure then
+# cascades through an unrelated-looking import chain (transformers's lazy
+# module loader -> peft -> a broad `from transformers import
+# BloomPreTrainedModel` -> transformers' object-detection loss utils ->
+# torchvision) into a confusing `ModuleNotFoundError: Could not import
+# module 'TrainerCallback'` several frames away from the real cause. If you
+# change the torch version here, change all three together and check
+# https://pytorch.org/get-started/previous-versions/ for the matching set
+# -- and update the Dockerfile's base image tag to match too (see its
+# comment), so pip isn't reinstalling a multi-GB torch on every build.
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+
+# transformers/trl/peft are still left as floors, not exact pins -- unlike
+# the torch triple above, these don't have the ABI-mismatch failure mode,
+# but they DO drift in ways that break API compatibility (trl removed
+# DataCollatorForCompletionOnlyLM outright between versions we hit earlier
+# in this project -- see train.py's docstring). Consider pinning these
+# exactly too once you have a known-working combination, rather than
+# re-discovering breakage on every rebuild.
+transformers>=4.46.0
+trl>=0.12.0
+peft>=0.13.0
+accelerate>=1.0.0
+bitsandbytes>=0.44.0
+datasets>=3.0.0
+huggingface_hub>=0.25.0
+sentencepiece
+protobuf
+
+# for the geometry-aware eval callback (reuses cad_dataset/executor.py,
+# which shells out to a real build123d install to check that generated
+# JSON IR actually compiles to valid geometry during training eval)
+build123d
+
+# optional experiment tracking -- safe to leave installed even if unused
+wandb

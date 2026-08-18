@@ -1,0 +1,22 @@
+# docker compose -p cad-stack \
+#   -f ../service/docker-compose.yml -f ../llm-service/docker-compose.yml -f docker-compose.yml up
+#
+# Standalone (pointing at an already-running llm-service elsewhere):
+#   docker compose --env-file .env up
+
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        # baked in at build time -- see Dockerfile comment. If llm-service
+        # runs on the same Docker network as this container, its
+        # container-to-container name works; if you're hitting a
+        # host-mapped port instead (see llm-service/README.md's fallback
+        # networking note), use that URL instead.
+        VITE_LLM_SERVICE_URL: ${VITE_LLM_SERVICE_URL:-http://localhost:8001}
+    image: cad-frontend:latest
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    restart: unless-stopped
