@@ -19,14 +19,25 @@ import json
 import os
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import Response, StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from orchestrator import Orchestrator
 from store import ProjectStore, ProjectNotFound
 
 app = FastAPI(title="LLM Service (CAD generation orchestrator)", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # your frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 orchestrator = Orchestrator(
     llama_url=os.environ.get("LLAMACPP_URL", "http://llamacpp:8080"),
@@ -41,6 +52,59 @@ class GenerateRequest(BaseModel):
     prompt: str
     base_ir: dict | None = None  # present -> this is an edit/regenerate, not a fresh generate
     max_attempts: int = 3
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/v1/auth/signup")
+async def signup(req: SignupRequest):
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+    try:
+        user = STORE.create_user(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"token": STORE.create_session(user["id"]), "user": user}
+
+
+@app.post("/v1/auth/login")
+async def login(req: LoginRequest):
+    user = STORE.authenticate(req.email, req.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid email or password")
+    return {"token": STORE.create_session(user["id"]), "user": user}
+
+
+_security = HTTPBearer()
+
+
+async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(_security)) -> dict:
+    """Reads the Authorization: Bearer <token> header, verifies it against
+    the sessions table, and injects the user. Not yet wired into any
+    /v1/projects* or /v1/logs* endpoint -- that's step 6/7. Adding this
+    dependency to a route is what actually requires auth; existing routes
+    are unaffected until that's done."""
+    user_id = STORE.verify_session(creds.credentials)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    user = STORE.get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    return user
+
+
+@app.post("/v1/auth/logout")
+async def logout(creds: HTTPAuthorizationCredentials = Depends(_security)):
+    STORE.delete_session(creds.credentials)
+    return {"logged_out": True}
     export_format: Literal["step", "stl", "glb"] | None = None
 
 
@@ -166,36 +230,46 @@ def _export_field(export_format: str | None):
     return attach
 
 
+def _require_owned_project(project_id: str, user: dict) -> dict:
+    """Fetches a project and verifies the current user owns it. Legacy
+    rows with owner_id=None (pre-auth data -- step 8's migration hasn't
+    run yet) are accessible to any authenticated user for now, not locked
+    out. 404 (not 403) on a mismatch, same as "doesn't exist" -- ownership
+    isn't something to leak via status code."""
+    try:
+        project = STORE.get_project(project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project["owner_id"] is not None and project["owner_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="project not found")
+    return project
+
+
 @app.post("/v1/projects")
-async def create_project(req: CreateProjectRequest):
-    return STORE.create_project(req.name)
+async def create_project(req: CreateProjectRequest, user: dict = Depends(get_current_user)):
+    return STORE.create_project(req.name, owner_id=user["id"])
 
 
 @app.get("/v1/projects")
-async def list_projects():
-    return STORE.list_projects()
+async def list_projects(user: dict = Depends(get_current_user)):
+    return STORE.list_projects(owner_id=user["id"])
 
 
 @app.get("/v1/projects/{project_id}")
-async def get_project(project_id: str):
-    try:
-        return STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+async def get_project(project_id: str, user: dict = Depends(get_current_user)):
+    return _require_owned_project(project_id, user)
 
 
 @app.get("/v1/projects/{project_id}/versions/{version_index}")
-async def get_project_version(project_id: str, version_index: int):
+async def get_project_version(project_id: str, version_index: int,
+                                user: dict = Depends(get_current_user)):
     """Fetch a specific historical version's full IR -- GET
     /v1/projects/{id} only returns full IR for `current`, metadata only
     (prompt, created_at) for past versions in `history`. Used by
     mine_flywheel_repairs.py (Phase 4 step 2) to resolve a logged fix's
     version_index back to an actual json_ir, since that fix is usually no
     longer the project's current version by the time mining runs."""
-    try:
-        STORE.get_project(project_id)  # 404 if the project itself doesn't exist
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+    _require_owned_project(project_id, user)
     version = STORE.get_version(project_id, version_index)
     if version is None:
         raise HTTPException(status_code=404, detail="version not found")
@@ -203,24 +277,22 @@ async def get_project_version(project_id: str, version_index: int):
 
 
 @app.delete("/v1/projects/{project_id}")
-async def delete_project(project_id: str):
-    if not STORE.delete_project(project_id):
-        raise HTTPException(status_code=404, detail="project not found")
+async def delete_project(project_id: str, user: dict = Depends(get_current_user)):
+    _require_owned_project(project_id, user)
+    STORE.delete_project(project_id)
     return {"deleted": True}
 
 
 @app.post("/v1/projects/{project_id}/generate")
-async def project_generate(project_id: str, req: ProjectGenerateRequest):
+async def project_generate(project_id: str, req: ProjectGenerateRequest,
+                             user: dict = Depends(get_current_user)):
     """Same self-correcting loop as /v1/generate, but base_ir is taken
     automatically from the project's current version (None for a
     project's first generation), and a successful result is appended as
     a new version -- this IS the "edits compose" behavior from the
     product-layer discussion, not something the frontend has to
     orchestrate by passing base_ir itself."""
-    try:
-        project = STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+    project = _require_owned_project(project_id, user)
 
     base_ir = project["current"]["json_ir"] if project["current"] else None
     result = await orchestrator.generate(req.prompt, base_ir, req.max_attempts)
@@ -254,7 +326,8 @@ class ApplyEditRequest(BaseModel):
 
 
 @app.post("/v1/projects/{project_id}/apply")
-async def project_apply_edit(project_id: str, req: ApplyEditRequest):
+async def project_apply_edit(project_id: str, req: ApplyEditRequest,
+                               user: dict = Depends(get_current_user)):
     """Structured-editing fallback (Phase 2 item 4): apply a directly-
     edited feature tree without going through the model at all -- for
     when the model got something wrong, or the user just wants to type an
@@ -265,10 +338,7 @@ async def project_apply_edit(project_id: str, req: ApplyEditRequest):
     `prompt` is stored as None for these versions -- see store.py's
     history and the frontend's restore logic, which renders that as
     "(edit)" rather than a fabricated prompt string."""
-    try:
-        STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+    _require_owned_project(project_id, user)
 
     result = await orchestrator.compile_only(req.json_ir)
     if not result.get("valid"):
@@ -297,11 +367,9 @@ async def project_apply_edit(project_id: str, req: ApplyEditRequest):
 
 
 @app.post("/v1/projects/{project_id}/undo")
-async def project_undo(project_id: str, export_format: Literal["step", "stl", "glb"] | None = "glb"):
-    try:
-        STORE.get_project(project_id)  # 404 if the project itself doesn't exist
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+async def project_undo(project_id: str, export_format: Literal["step", "stl", "glb"] | None = "glb",
+                         user: dict = Depends(get_current_user)):
+    _require_owned_project(project_id, user)
     version = STORE.undo(project_id)
     STORE.log_event(
         project_id=project_id, action="undo", success=version is not None,
@@ -316,11 +384,9 @@ async def project_undo(project_id: str, export_format: Literal["step", "stl", "g
 
 
 @app.post("/v1/projects/{project_id}/redo")
-async def project_redo(project_id: str, export_format: Literal["step", "stl", "glb"] | None = "glb"):
-    try:
-        STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+async def project_redo(project_id: str, export_format: Literal["step", "stl", "glb"] | None = "glb",
+                         user: dict = Depends(get_current_user)):
+    _require_owned_project(project_id, user)
     version = STORE.redo(project_id)
     STORE.log_event(
         project_id=project_id, action="redo", success=version is not None,
@@ -335,16 +401,14 @@ async def project_redo(project_id: str, export_format: Literal["step", "stl", "g
 
 
 @app.get("/v1/projects/{project_id}/render")
-async def project_render(project_id: str, format: Literal["step", "stl", "glb"] = "glb"):
+async def project_render(project_id: str, format: Literal["step", "stl", "glb"] = "glb",
+                           user: dict = Depends(get_current_user)):
     """Raw binary export of the project's CURRENT version, for restoring
     the viewport on page load (the frontend already has the ir/stats from
     GET /v1/projects/{id}; it only needs bytes here, so this returns the
     file directly rather than wrapping it in base64+JSON like the
     generate/undo/redo endpoints do)."""
-    try:
-        project = STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+    project = _require_owned_project(project_id, user)
     if project["current"] is None:
         raise HTTPException(status_code=409, detail="project has no versions yet")
 
@@ -358,7 +422,7 @@ async def project_render(project_id: str, format: Literal["step", "stl", "glb"] 
 
 
 @app.post("/v1/projects/{project_id}/log-download")
-async def log_download(project_id: str):
+async def log_download(project_id: str, user: dict = Depends(get_current_user)):
     """Explicit download-intent signal, called by the frontend right when
     a user clicks a download button (see frontend/src/App.jsx's
     handleDownload). Deliberately separate from GET .../render above --
@@ -366,10 +430,7 @@ async def log_download(project_id: str):
     reload, and conflating the two would make every reload look like an
     "accepted" signal in compute_outcomes() below. This endpoint does
     nothing but log; the actual file bytes still come from .../render."""
-    try:
-        STORE.get_project(project_id)
-    except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+    _require_owned_project(project_id, user)
     STORE.log_event(project_id=project_id, action="download", success=True)
     return {"logged": True}
 

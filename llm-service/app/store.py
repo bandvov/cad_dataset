@@ -134,22 +134,29 @@ class ProjectStore:
     # ------------------------------------------------------------------ #
     # projects
     # ------------------------------------------------------------------ #
-    def create_project(self, name: str) -> dict:
+    def create_project(self, name: str, owner_id: str | None = None) -> dict:
         pid = str(uuid.uuid4())
         now = _now()
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO projects (id, name, created_at, updated_at, current_version_index) "
-                "VALUES (?, ?, ?, ?, -1)",
-                (pid, name, now, now),
+                "INSERT INTO projects (id, owner_id, name, created_at, updated_at, current_version_index) "
+                "VALUES (?, ?, ?, ?, ?, -1)",
+                (pid, owner_id, name, now, now),
             )
-        return {"id": pid, "name": name, "created_at": now, "updated_at": now}
+        return {"id": pid, "owner_id": owner_id, "name": name, "created_at": now, "updated_at": now}
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self, owner_id: str | None = None) -> list[dict]:
         with self._cursor() as cur:
-            rows = cur.execute(
-                "SELECT id, name, created_at, updated_at FROM projects ORDER BY updated_at DESC"
-            ).fetchall()
+            if owner_id is not None:
+                rows = cur.execute(
+                    "SELECT id, owner_id, name, created_at, updated_at FROM projects "
+                    "WHERE owner_id = ? ORDER BY updated_at DESC",
+                    (owner_id,),
+                ).fetchall()
+            else:
+                rows = cur.execute(
+                    "SELECT id, owner_id, name, created_at, updated_at FROM projects ORDER BY updated_at DESC"
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def delete_project(self, project_id: str) -> bool:
@@ -179,6 +186,7 @@ class ProjectStore:
                 ).fetchone()
         return {
             "id": proj["id"],
+            "owner_id": proj["owner_id"],
             "name": proj["name"],
             "created_at": proj["created_at"],
             "updated_at": proj["updated_at"],
@@ -192,6 +200,39 @@ class ProjectStore:
             ],
             "current": self._row_to_version(current),
         }
+
+    # ------------------------------------------------------------------ #
+    # users
+    # ------------------------------------------------------------------ #
+    def create_user(self, email: str, password: str) -> dict:
+        uid = str(uuid.uuid4())
+        now = _now()
+        try:
+            with self._cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                    (uid, email, hash_password(password), now),
+                )
+        except sqlite3.IntegrityError:
+            raise ValueError(f"email '{email}' already registered")
+        return {"id": uid, "email": email, "created_at": now}
+
+    def authenticate(self, email: str, password: str) -> dict | None:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT id, email, password_hash, created_at FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+        if row is None or not verify_password(password, row["password_hash"]):
+            return None
+        return {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
+
+    def get_user(self, user_id: str) -> dict | None:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT id, email, created_at FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     # ------------------------------------------------------------------ #
     # sessions (opaque, revocable tokens -- not JWT)
