@@ -45,13 +45,22 @@ orchestrator = Orchestrator(
     http_timeout=float(os.environ.get("HTTP_TIMEOUT", "60")),
 )
 
-STORE = ProjectStore(os.environ.get("DB_PATH", "/data/cad_sessions.db"))
+def _env_float(key: str) -> float | None:
+    val = os.environ.get(key)
+    return float(val) if val else None  # unset or blank -> None (no expiry), not 0.0
+
+
+STORE = ProjectStore(
+    os.environ.get("DB_PATH", "/data/cad_sessions.db"),
+    session_lifetime_hours=_env_float("SESSION_LIFETIME_HOURS"),
+)
 
 
 class GenerateRequest(BaseModel):
     prompt: str
     base_ir: dict | None = None  # present -> this is an edit/regenerate, not a fresh generate
     max_attempts: int = 3
+    export_format: Literal["step", "stl", "glb"] | None = None
 
 
 class SignupRequest(BaseModel):
@@ -88,10 +97,7 @@ _security = HTTPBearer()
 
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(_security)) -> dict:
     """Reads the Authorization: Bearer <token> header, verifies it against
-    the sessions table, and injects the user. Not yet wired into any
-    /v1/projects* or /v1/logs* endpoint -- that's step 6/7. Adding this
-    dependency to a route is what actually requires auth; existing routes
-    are unaffected until that's done."""
+    the sessions table, and injects the user."""
     user_id = STORE.verify_session(creds.credentials)
     if user_id is None:
         raise HTTPException(status_code=401, detail="invalid or expired token")
@@ -105,7 +111,6 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(_securi
 async def logout(creds: HTTPAuthorizationCredentials = Depends(_security)):
     STORE.delete_session(creds.credentials)
     return {"logged_out": True}
-    export_format: Literal["step", "stl", "glb"] | None = None
 
 
 @app.get("/health")
@@ -115,12 +120,12 @@ async def health():
 
 @app.post("/v1/generate")
 async def generate(req: GenerateRequest):
-    """The main product-facing endpoint. success=false with a populated
-    `error` means the model couldn't produce valid geometry within
-    max_attempts -- surface that to the user rather than the raw IR;
-    `conversation` is included for debugging/observability (log it --
-    per the product-layer discussion, prompts + outcomes are exactly the
-    signal to mine for the next round of training data)."""
+    """The main product-facing endpoint. Deliberately NOT behind auth
+    (see SESSION_HANDOFF.md) -- its log_event() call below gets
+    user_id=None, same bucket as legacy/pre-migration rows. success=false
+    with a populated `error` means the model couldn't produce valid
+    geometry within max_attempts -- surface that to the user rather than
+    the raw IR; `conversation` is included for debugging/observability."""
     result = await orchestrator.generate(req.prompt, req.base_ir, req.max_attempts)
     STORE.log_event(
         project_id=None, action="generate", prompt=req.prompt,
@@ -150,17 +155,6 @@ async def generate_stream(req: GenerateRequest):
     (NDJSON) -- one `{"event": ...}\\n` object per line, flushed as each
     step happens, so a client can show live progress ("attempt 1/3",
     "repairing...") instead of waiting silently for the whole loop.
-
-    Event shapes (see orchestrator.generate_stream() for the exact set):
-      {"event": "start", "max_attempts": 3}
-      {"event": "attempt_start", "attempt": 1, "max_attempts": 3}
-      {"event": "llm_response", "attempt": 1, "content": "..."}
-      {"event": "validating", "attempt": 1}
-      {"event": "attempt_failed", "attempt": 1, "error_type": "...", "error": "..."}
-      {"event": "repairing", "attempt": 1, "next_attempt": 2}
-      {"event": "success", "attempts": 2, "json_ir": {...}, "stats": {...}, "conversation": [...]}
-      {"event": "failure", "attempts": 3, "json_ir": {...}, "error": "...", "conversation": [...]}
-      {"event": "exported", "content_type": "...", "file_b64": "..."}   -- only if export_format set and success
 
     curl example:
       curl -N -X POST localhost:8001/v1/generate/stream \\
@@ -195,12 +189,11 @@ async def generate_stream(req: GenerateRequest):
 
 
 # ---------------------------------------------------------------------- #
-# Projects: persisted, versioned feature trees (Phase 2 item 1 -- "a CAD
-# service isn't 'prompt -> JSON', it's session state: a user has a part,
-# iterates on it, and expects edits to compose"). See store.py for the
-# undo/redo model. The stateless /v1/generate above still exists for
-# one-off use; these endpoints are for the normal product flow where a
-# user is iterating on one part across multiple turns.
+# Projects: persisted, versioned feature trees (Phase 2 item 1). See
+# store.py for the undo/redo model. The stateless /v1/generate above
+# still exists for one-off use; these endpoints are for the normal
+# product flow where a user is iterating on one part across multiple
+# turns.
 # ---------------------------------------------------------------------- #
 
 class CreateProjectRequest(BaseModel):
@@ -232,10 +225,11 @@ def _export_field(export_format: str | None):
 
 def _require_owned_project(project_id: str, user: dict) -> dict:
     """Fetches a project and verifies the current user owns it. Legacy
-    rows with owner_id=None (pre-auth data -- step 8's migration hasn't
-    run yet) are accessible to any authenticated user for now, not locked
-    out. 404 (not 403) on a mismatch, same as "doesn't exist" -- ownership
-    isn't something to leak via status code."""
+    rows with owner_id=None (pre-auth data not yet backfilled by
+    migrate_legacy_owner.py -- auth step 8) are accessible to any
+    authenticated user for now, not locked out. 404 (not 403) on a
+    mismatch, same as "doesn't exist" -- ownership isn't something to
+    leak via status code."""
     try:
         project = STORE.get_project(project_id)
     except ProjectNotFound:
@@ -266,9 +260,8 @@ async def get_project_version(project_id: str, version_index: int,
     """Fetch a specific historical version's full IR -- GET
     /v1/projects/{id} only returns full IR for `current`, metadata only
     (prompt, created_at) for past versions in `history`. Used by
-    mine_flywheel_repairs.py (Phase 4 step 2) to resolve a logged fix's
-    version_index back to an actual json_ir, since that fix is usually no
-    longer the project's current version by the time mining runs."""
+    mine_flywheel_repairs.py to resolve a logged fix's version_index back
+    to an actual json_ir."""
     _require_owned_project(project_id, user)
     version = STORE.get_version(project_id, version_index)
     if version is None:
@@ -289,9 +282,8 @@ async def project_generate(project_id: str, req: ProjectGenerateRequest,
     """Same self-correcting loop as /v1/generate, but base_ir is taken
     automatically from the project's current version (None for a
     project's first generation), and a successful result is appended as
-    a new version -- this IS the "edits compose" behavior from the
-    product-layer discussion, not something the frontend has to
-    orchestrate by passing base_ir itself."""
+    a new version -- this IS the "edits compose" behavior, not something
+    the frontend has to orchestrate by passing base_ir itself."""
     project = _require_owned_project(project_id, user)
 
     base_ir = project["current"]["json_ir"] if project["current"] else None
@@ -316,6 +308,7 @@ async def project_generate(project_id: str, req: ProjectGenerateRequest,
         project_id=project_id, action="generate", prompt=req.prompt,
         success=result.success, error=result.error, attempts=result.attempts,
         version_index=version_index, failed_ir=None if result.success else result.json_ir,
+        user_id=user["id"],
     )
     return response
 
@@ -329,15 +322,10 @@ class ApplyEditRequest(BaseModel):
 async def project_apply_edit(project_id: str, req: ApplyEditRequest,
                                user: dict = Depends(get_current_user)):
     """Structured-editing fallback (Phase 2 item 4): apply a directly-
-    edited feature tree without going through the model at all -- for
-    when the model got something wrong, or the user just wants to type an
-    exact number rather than re-prompt and hope. Validates against the
-    geometry service via orchestrator.compile_only() and, on success,
-    appends a new version with the SAME semantics as a model-generated
-    edit (undo/redo doesn't distinguish how a version was produced).
-    `prompt` is stored as None for these versions -- see store.py's
-    history and the frontend's restore logic, which renders that as
-    "(edit)" rather than a fabricated prompt string."""
+    edited feature tree without going through the model at all. Validates
+    against the geometry service via orchestrator.compile_only() and, on
+    success, appends a new version with the SAME semantics as a
+    model-generated edit. `prompt` is stored as None for these versions."""
     _require_owned_project(project_id, user)
 
     result = await orchestrator.compile_only(req.json_ir)
@@ -345,7 +333,7 @@ async def project_apply_edit(project_id: str, req: ApplyEditRequest,
         STORE.log_event(
             project_id=project_id, action="apply", success=False,
             error_type=result.get("error_type"), error=result.get("error"),
-            failed_ir=req.json_ir,
+            failed_ir=req.json_ir, user_id=user["id"],
         )
         raise HTTPException(status_code=422, detail={
             "error_type": result.get("error_type"),
@@ -355,7 +343,7 @@ async def project_apply_edit(project_id: str, req: ApplyEditRequest,
     version = STORE.add_version(project_id, req.json_ir, None, result.get("stats"))
     STORE.log_event(
         project_id=project_id, action="apply", success=True,
-        version_index=version["version_index"],
+        version_index=version["version_index"], user_id=user["id"],
     )
     response = {
         "success": True,
@@ -375,6 +363,7 @@ async def project_undo(project_id: str, export_format: Literal["step", "stl", "g
         project_id=project_id, action="undo", success=version is not None,
         error=None if version else "nothing to undo",
         version_index=version["version_index"] if version else None,
+        user_id=user["id"],
     )
     if version is None:
         raise HTTPException(status_code=409, detail="nothing to undo")
@@ -392,6 +381,7 @@ async def project_redo(project_id: str, export_format: Literal["step", "stl", "g
         project_id=project_id, action="redo", success=version is not None,
         error=None if version else "nothing to redo",
         version_index=version["version_index"] if version else None,
+        user_id=user["id"],
     )
     if version is None:
         raise HTTPException(status_code=409, detail="nothing to redo")
@@ -404,10 +394,7 @@ async def project_redo(project_id: str, export_format: Literal["step", "stl", "g
 async def project_render(project_id: str, format: Literal["step", "stl", "glb"] = "glb",
                            user: dict = Depends(get_current_user)):
     """Raw binary export of the project's CURRENT version, for restoring
-    the viewport on page load (the frontend already has the ir/stats from
-    GET /v1/projects/{id}; it only needs bytes here, so this returns the
-    file directly rather than wrapping it in base64+JSON like the
-    generate/undo/redo endpoints do)."""
+    the viewport on page load."""
     project = _require_owned_project(project_id, user)
     if project["current"] is None:
         raise HTTPException(status_code=409, detail="project has no versions yet")
@@ -424,35 +411,36 @@ async def project_render(project_id: str, format: Literal["step", "stl", "glb"] 
 @app.post("/v1/projects/{project_id}/log-download")
 async def log_download(project_id: str, user: dict = Depends(get_current_user)):
     """Explicit download-intent signal, called by the frontend right when
-    a user clicks a download button (see frontend/src/App.jsx's
-    handleDownload). Deliberately separate from GET .../render above --
-    that endpoint is ALSO used to restore the viewport after a page
-    reload, and conflating the two would make every reload look like an
-    "accepted" signal in compute_outcomes() below. This endpoint does
-    nothing but log; the actual file bytes still come from .../render."""
+    a user clicks a download button. Deliberately separate from GET
+    .../render above -- that endpoint is ALSO used to restore the
+    viewport after a page reload, and conflating the two would make
+    every reload look like an "accepted" signal in compute_outcomes()
+    below. This endpoint does nothing but log; the actual file bytes
+    still come from .../render."""
     _require_owned_project(project_id, user)
-    STORE.log_event(project_id=project_id, action="download", success=True)
+    STORE.log_event(project_id=project_id, action="download", success=True, user_id=user["id"])
     return {"logged": True}
 
 
 # ---------------------------------------------------------------------- #
-# Request log (Phase 3 item 2): "log every production request: prompt,
-# generated IR, validity outcome, and -- critically -- what the user did
-# next." See store.py's compute_outcomes() docstring for exactly what
-# each outcome label does and doesn't claim to mean -- this is raw event
+# Request log (Phase 3 item 2 / auth step 7): scoped by user_id.
+# See store.py's compute_outcomes() docstring for exactly what each
+# outcome label does and doesn't claim to mean -- this is raw event
 # sequence, not a validated read of user satisfaction.
 # ---------------------------------------------------------------------- #
 
 @app.get("/v1/logs")
-async def get_logs(project_id: str | None = None, limit: int = 200):
-    return STORE.list_events(project_id=project_id, limit=limit)
+async def get_logs(project_id: str | None = None, limit: int = 200,
+                    user: dict = Depends(get_current_user)):
+    return STORE.list_events(project_id=project_id, user_id=user["id"], limit=limit)
 
 
 @app.get("/v1/logs/outcomes")
-async def get_log_outcomes(project_id: str | None = None, limit: int = 500):
-    return STORE.compute_outcomes(project_id=project_id, limit=limit)
+async def get_log_outcomes(project_id: str | None = None, limit: int = 500,
+                             user: dict = Depends(get_current_user)):
+    return STORE.compute_outcomes(project_id=project_id, user_id=user["id"], limit=limit)
 
 
 @app.get("/v1/logs/summary")
-async def get_log_summary():
-    return STORE.log_summary()
+async def get_log_summary(user: dict = Depends(get_current_user)):
+    return STORE.log_summary(user_id=user["id"])

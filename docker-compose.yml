@@ -85,6 +85,9 @@ services:
       - GEOMETRY_SERVICE_URL=http://geometry:8000
       - HTTP_TIMEOUT=${HTTP_TIMEOUT:-60}
       - DB_PATH=/data/cad_sessions.db
+      # auth step 9 -- see .env.example for what these control
+      - SESSION_LIFETIME_HOURS=${SESSION_LIFETIME_HOURS:-}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
     ports:
       - "${LLM_SERVICE_PORT:-8001}:8000"
     volumes:

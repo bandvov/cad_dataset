@@ -10,9 +10,12 @@ a `current_version_index` pointer. Undo/redo just move the pointer.
 Generating after an undo truncates the "future" versions beyond the
 pointer before appending -- standard editor undo/redo semantics.
 
-NOTE: no auth/multi-tenancy yet (no users table, no owner_id) -- that's
-planned but not implemented. See the auth implementation steps discussed
-separately; this file intentionally does not contain a partial attempt.
+Auth status: steps 1-8 of the auth plan are in this file --
+users/sessions (steps 1-4), get_current_user support (step 5, in
+main.py), owner_id on projects (step 6), user_id on request_log (step
+7), and the legacy-data backfill helpers used by
+migrate_legacy_owner.py (step 8). Frontend auth support (steps 10-12)
+is not implemented -- see SESSION_HANDOFF.md.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS versions (
 CREATE TABLE IF NOT EXISTS request_log (
     id TEXT PRIMARY KEY,
     project_id TEXT,
+    user_id TEXT,
     action TEXT NOT NULL,
     prompt TEXT,
     success INTEGER,
@@ -91,6 +95,8 @@ CREATE TABLE IF NOT EXISTS request_log (
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_project_time
     ON request_log(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_request_log_user_time
+    ON request_log(user_id, created_at);
 """
 
 
@@ -98,24 +104,47 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_dt(s: str) -> datetime:
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class ProjectNotFound(KeyError):
     pass
 
 
 class ProjectStore:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, session_lifetime_hours: float | None = None):
+        """session_lifetime_hours: auth step 9 config knob. None (default)
+        means sessions never passively expire -- opaque tokens don't need
+        a signed expiry the way JWT would (revocation is already
+        immediate via delete_session/logout, which removes the row
+        outright), so this is a policy choice, not a security
+        requirement. Set it if you want inactive sessions to eventually
+        stop working on their own."""
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.db_path = db_path
+        self.session_lifetime_hours = session_lifetime_hours
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
-        try:
-            self._conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists -- fine, this only matters for pre-existing DB files
+        # migration guards -- only matter for DB files created before the
+        # column existed; a no-op (OperationalError swallowed) on fresh
+        # DBs where SCHEMA above already created it
+        for stmt in (
+            "ALTER TABLE projects ADD COLUMN owner_id TEXT",
+            "ALTER TABLE request_log ADD COLUMN user_id TEXT",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_request_log_user_time ON request_log(user_id, created_at)")
         self._conn.commit()
 
     @contextmanager
@@ -234,6 +263,13 @@ class ProjectStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_user_by_email(self, email: str) -> dict | None:
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT id, email, created_at FROM users WHERE email = ?", (email,)
+            ).fetchone()
+        return dict(row) if row else None
+
     # ------------------------------------------------------------------ #
     # sessions (opaque, revocable tokens -- not JWT)
     # ------------------------------------------------------------------ #
@@ -247,10 +283,24 @@ class ProjectStore:
         return token
 
     def verify_session(self, token: str) -> str | None:
-        """Returns user_id if the token is valid, else None."""
+        """Returns user_id if the token is valid and not expired, else
+        None. Expiry is checked lazily here (not swept by a background
+        job -- this service doesn't run one) and an expired row is
+        deleted on read, same "checked lazily, cleaned up lazily"
+        approach as the rest of this store. If session_lifetime_hours is
+        None, every session is valid until explicitly logged out."""
         with self._cursor() as cur:
-            row = cur.execute("SELECT user_id FROM sessions WHERE token = ?", (token,)).fetchone()
-        return row["user_id"] if row else None
+            row = cur.execute(
+                "SELECT user_id, created_at FROM sessions WHERE token = ?", (token,)
+            ).fetchone()
+        if row is None:
+            return None
+        if self.session_lifetime_hours is not None:
+            age_hours = (datetime.now(timezone.utc) - _parse_dt(row["created_at"])).total_seconds() / 3600
+            if age_hours > self.session_lifetime_hours:
+                self.delete_session(token)
+                return None
+        return row["user_id"]
 
     def delete_session(self, token: str) -> bool:
         with self._cursor() as cur:
@@ -343,39 +393,50 @@ class ProjectStore:
         return self._row_to_version(row)
 
     # ------------------------------------------------------------------ #
-    # request log (Phase 3 item 2)
+    # request log (Phase 3 item 2 / auth step 7: scoped by user_id)
     # ------------------------------------------------------------------ #
     def log_event(self, *, project_id: str | None, action: str, prompt: str | None = None,
                    success: bool | None = None, error_type: str | None = None,
                    error: str | None = None, attempts: int | None = None,
-                   version_index: int | None = None, failed_ir: dict | None = None) -> dict:
+                   version_index: int | None = None, failed_ir: dict | None = None,
+                   user_id: str | None = None) -> dict:
+        """user_id is None for the stateless /v1/generate path (no auth
+        there) and for any pre-migration row -- see list_events() /
+        compute_outcomes() for how those legacy rows stay visible to any
+        authenticated caller until migrate_legacy_owner.py (step 8) runs."""
         eid = str(uuid.uuid4())
         now = _now()
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO request_log (id, project_id, action, prompt, success, "
+                "INSERT INTO request_log (id, project_id, user_id, action, prompt, success, "
                 "error_type, error, attempts, version_index, failed_ir, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (eid, project_id, action, prompt,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (eid, project_id, user_id, action, prompt,
                  None if success is None else int(success),
                  error_type, error, attempts, version_index,
                  json.dumps(failed_ir) if failed_ir is not None else None, now),
             )
         return {"id": eid, "created_at": now}
 
-    def list_events(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
+    def list_events(self, project_id: str | None = None, user_id: str | None = None,
+                     limit: int = 200) -> list[dict]:
+        conditions, params = [], []
+        if project_id is not None:
+            conditions.append("project_id = ?")
+            params.append(project_id)
+        if user_id is not None:
+            # legacy rows (user_id IS NULL, predating step 7 / not yet
+            # backfilled by step 8) stay visible to any authenticated
+            # user -- same stopgap policy _require_owned_project() already
+            # applies to owner_id=None projects
+            conditions.append("(user_id = ? OR user_id IS NULL)")
+            params.append(user_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._cursor() as cur:
-            if project_id is not None:
-                rows = cur.execute(
-                    "SELECT * FROM request_log WHERE project_id = ? "
-                    "ORDER BY created_at DESC LIMIT ?",
-                    (project_id, limit),
-                ).fetchall()
-            else:
-                rows = cur.execute(
-                    "SELECT * FROM request_log ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            rows = cur.execute(
+                f"SELECT * FROM request_log {where} ORDER BY created_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
     @staticmethod
@@ -383,6 +444,7 @@ class ProjectStore:
         return {
             "id": row["id"],
             "project_id": row["project_id"],
+            "user_id": row["user_id"],
             "action": row["action"],
             "prompt": row["prompt"],
             "success": None if row["success"] is None else bool(row["success"]),
@@ -394,14 +456,19 @@ class ProjectStore:
             "created_at": row["created_at"],
         }
 
-    def log_summary(self) -> dict:
+    def log_summary(self, user_id: str | None = None) -> dict:
+        where = "WHERE user_id = ? OR user_id IS NULL" if user_id is not None else ""
+        params = (user_id,) if user_id is not None else ()
         with self._cursor() as cur:
-            total = cur.execute("SELECT COUNT(*) AS n FROM request_log").fetchone()["n"]
+            total = cur.execute(
+                f"SELECT COUNT(*) AS n FROM request_log {where}", params
+            ).fetchone()["n"]
             by_action = cur.execute(
-                "SELECT action, COUNT(*) AS n, "
-                "SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS n_success, "
-                "AVG(attempts) AS avg_attempts "
-                "FROM request_log GROUP BY action"
+                f"SELECT action, COUNT(*) AS n, "
+                f"SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS n_success, "
+                f"AVG(attempts) AS avg_attempts "
+                f"FROM request_log {where} GROUP BY action",
+                params,
             ).fetchall()
         return {
             "total_events": total,
@@ -416,10 +483,11 @@ class ProjectStore:
             ],
         }
 
-    def compute_outcomes(self, project_id: str | None = None, limit: int = 500) -> list[dict]:
+    def compute_outcomes(self, project_id: str | None = None, user_id: str | None = None,
+                          limit: int = 500) -> list[dict]:
         """See earlier documentation of this method: outcome labels are a
         literal fact about event sequence, not a read of user intent."""
-        events = self.list_events(project_id=project_id, limit=limit)
+        events = self.list_events(project_id=project_id, user_id=user_id, limit=limit)
         events.sort(key=lambda e: e["created_at"])
 
         by_project: dict[str | None, list[dict]] = {}
@@ -446,3 +514,66 @@ class ProjectStore:
                     outcome = "other"
                 results.append({**event, "outcome": outcome})
         return results
+
+    # ------------------------------------------------------------------ #
+    # auth step 8: legacy data migration. Assigns pre-auth rows
+    # (owner_id/user_id IS NULL) to a designated user rather than leaving
+    # them permanently shared -- see migrate_legacy_owner.py, the script
+    # that actually drives this.
+    # ------------------------------------------------------------------ #
+    def count_legacy_rows(self) -> dict:
+        with self._cursor() as cur:
+            n_projects = cur.execute(
+                "SELECT COUNT(*) AS n FROM projects WHERE owner_id IS NULL"
+            ).fetchone()["n"]
+            n_events_migratable = cur.execute(
+                "SELECT COUNT(*) AS n FROM request_log "
+                "WHERE user_id IS NULL AND project_id IS NOT NULL"
+            ).fetchone()["n"]
+            n_events_stateless = cur.execute(
+                "SELECT COUNT(*) AS n FROM request_log "
+                "WHERE user_id IS NULL AND project_id IS NULL"
+            ).fetchone()["n"]
+        return {
+            "legacy_projects": n_projects,
+            "legacy_request_log_events_migratable": n_events_migratable,
+            "legacy_request_log_events_stateless": n_events_stateless,
+        }
+
+    def backfill_legacy_ownership(self, default_user_id: str) -> dict:
+        """Assigns every owner_id IS NULL project to default_user_id, and
+        every user_id IS NULL request_log row that belongs to one of
+        those (pre-update) legacy projects to the same user. request_log
+        rows with NO project_id (the stateless /v1/generate path, which
+        has never had a user concept) are left untouched -- there's no
+        project to anchor them to, and guessing an owner would
+        misattribute requests nobody authenticated for.
+
+        Idempotent: only NULL columns are ever written, so a repeat or
+        partial-failure rerun is safe. The legacy project id set is
+        captured BEFORE the projects UPDATE so the request_log UPDATE
+        below is scoped to exactly those (not to "whatever now has this
+        owner_id", which could accidentally include already-owned rows
+        created after migration started)."""
+        with self._cursor() as cur:
+            legacy_project_ids = [
+                r["id"] for r in cur.execute(
+                    "SELECT id FROM projects WHERE owner_id IS NULL"
+                ).fetchall()
+            ]
+            cur.execute(
+                "UPDATE projects SET owner_id = ? WHERE owner_id IS NULL",
+                (default_user_id,),
+            )
+            n_projects = cur.rowcount
+
+            n_events = 0
+            if legacy_project_ids:
+                placeholders = ",".join("?" for _ in legacy_project_ids)
+                cur.execute(
+                    f"UPDATE request_log SET user_id = ? "
+                    f"WHERE user_id IS NULL AND project_id IN ({placeholders})",
+                    (default_user_id, *legacy_project_ids),
+                )
+                n_events = cur.rowcount
+        return {"projects_updated": n_projects, "request_log_events_updated": n_events}
