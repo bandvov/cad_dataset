@@ -41,22 +41,34 @@ everything needed to continue in a fresh conversation.
 8. `build_dataset.py --include-flywheel-data` — merge point, re-checks `verified:true` itself
 9. `mine_flywheel_gate.py` — count thresholds, exit 0/1
 
-## Auth (in progress — 3 of 14 steps)
+## Auth (in progress — 6 of 14 steps)
 
-Plan (14 steps) was laid out but not all implemented. **Done, in `llm-service/app/store.py`**:
-1. `users` table, nullable `owner_id` on `projects`, migration guard (`ALTER TABLE` for pre-existing DBs)
-2. `hash_password`/`verify_password` — stdlib PBKDF2-HMAC-SHA256, no bcrypt dependency
-3. `sessions` table + `create_session`/`verify_session`/`delete_session` — opaque tokens (`secrets.token_urlsafe`), not JWT, so logout actually revokes
+Full plan, all 14 steps described (not just done ones):
 
-**Not started**: signup/login endpoints (step 4), FastAPI auth dependency (step 5), scoping `/v1/projects*` + request log by owner (steps 6-7), data migration for existing rows (step 8), secrets config (step 9), and the entire frontend side (steps 10-13: login UI, token storage, 401 handling, rate limiting). **The frontend has zero auth support right now** — don't turn on backend enforcement without it, or the app breaks.
+1. **Schema** — `users` table (id, email, password_hash, created_at), nullable `owner_id` on `projects`, migration guard (`ALTER TABLE` for pre-existing DB files). ✅ done
+2. **Password handling** — `hash_password`/`verify_password`, stdlib PBKDF2-HMAC-SHA256, no bcrypt/argon2 dependency. ✅ done
+3. **Token issuance** — chose opaque session tokens over JWT (need DB-backed revocation anyway). `sessions` table + `create_session`/`verify_session`/`delete_session`. ✅ done
+4. **Signup/login endpoints** — `store.create_user`/`authenticate`; `POST /v1/auth/signup`, `POST /v1/auth/login` in `main.py`, both return `{token, user}`. ✅ done
+5. **Auth dependency** — `get_current_user` (FastAPI `Depends`): reads `Authorization: Bearer <token>`, `verify_session` → `store.get_user`, 401 on either failure. Also unblocked `POST /v1/auth/logout`. `store.get_user(user_id)` added to support it. ✅ done
+6. **Scope project endpoints** — `Depends(get_current_user)` added to all 10 `/v1/projects*` routes (CRUD + generate/apply/undo/redo/render/log-download). Shared `_require_owned_project(project_id, user)` helper: 404 (not 403) on missing-or-not-owned, so ownership isn't leaked via status code. `create_project`/`list_projects` scoped by `owner_id`. **Legacy rows with `owner_id=None` (pre-migration data) stay accessible to any authenticated user** until step 8 runs. ✅ done
+7. **Scope the request log** — add `user_id` column to `request_log`; thread it through every `log_event` call; scope `/v1/logs*` endpoints to the requesting user (or an admin role). ⬜ not started
+8. **Migration for existing data** — backfill script for pre-existing `projects`/`request_log` rows with `owner_id IS NULL` (assign to a default/admin user, or leave null with a documented "legacy = shared" behavior). Closes the gap step 6 left open. ⬜ not started
+9. **Secrets/config** — no secret-signing needed for opaque tokens (unlike JWT), but add rate-limit/session-lifetime config to `.env.example` if wanted. Mostly relevant if step 3's approach ever changes to JWT. ⬜ not started
+10. **Frontend: login/signup UI** — new `LoginPage`/`SignupPage` components; gate `App` behind authenticated state. ⬜ not started
+11. **Frontend: token storage** — store issued token (currently only `localStorage` has the project id; token needs the same treatment); send `Authorization: Bearer <token>` on every `api.js` call. ⬜ not started
+12. **Frontend: 401 handling** — global fetch wrapper redirecting to login on 401; clear stored token/project id together. ⬜ not started
+13. **Rate limiting (keyed on user_id)** — per-user request budget middleware in `llm-service`, now that requests are attributable to a user (step 6 makes this possible). ⬜ not started
+14. **Verification** — signup → login → create project → confirm a second user can't see/access the first user's projects (404) → confirm request log scoping (step 7) → confirm migration (step 8) didn't orphan existing data. ⬜ not started
+
+**Backend enforcement is live (steps 1-6) but the frontend has zero auth support** — no login UI, no token storage, no auth header on any request. Every frontend call to `/v1/projects*` will now 401 until steps 10-12 are done. Don't deploy this as-is; either finish through step 12 before going live, or keep backend auth off (routes still work unauthenticated-equivalent only if `Depends(get_current_user)` is removed, which it currently is NOT — so right now the stack is backend-broken for the existing frontend until the frontend catches up).
 
 ## Verified vs. not
 
 Real build123d/npm/GPU were never available in this sandbox. Everything Python-side that doesn't need them was actually run and tested here (schema/compiler logic, `store.py`'s SQL including undo/redo edge cases and the auth pieces above, the flywheel scripts' pairing/dedup/gate logic, `featureEdit.js`). Frontend JS was verified via `esbuild` (real JSX parsing + full bundle-resolution, not just syntax checks). Anything touching real build123d execution, llama.cpp, or a browser was verified against `stub_build123d/` (a fake, docstring-flagged as not a geometry check) or not at all — each README says explicitly which. Two real bugs were caught and fixed from actual user-reported tracebacks: a torch/torchvision ABI mismatch (pinned exact versions) and a tokenizer reconversion failure in `merge_adapter.py` (load tokenizer from `--base-model`, not `--adapter-dir`).
 
-## Known issue: recurring sandbox contamination
+## Known issue: recurring sandbox contamination (and one full wipe)
 
-Files not written by me have repeatedly appeared already-populated in this sandbox — `executor.py`, an entire `frontend/` tree, `store.py` (**three separate times**, including a partial auth implementation baked into an already-delivered zip), `main.py`'s auth block, and — caught while writing this summary — `mine_flywheel_pairs.py`, `mine_repair_pairs.py`, `training/compare_checkpoints.py`, plus a fabricated "step 12" line in `README.md` claiming a nonexistent script was done. Standing discipline: diff every file against the last delivered zip before trusting it, discard-and-rewrite rather than adapt foreign code even when it looks correct. **Whoever continues this project should keep doing this** — check files against the zip before editing, especially `store.py`.
+Files not written by me have repeatedly appeared already-populated in this sandbox — `executor.py`, an entire `frontend/` tree, `store.py` (**four separate times** now), `main.py`'s auth block, `mine_flywheel_pairs.py`, `mine_repair_pairs.py`, `training/compare_checkpoints.py`, plus a fabricated "step 12" line in `README.md` claiming a nonexistent script was done. Separately, and more severely: while updating this file, the **entire `/home/claude/cad_dataset` directory was found missing** (not contaminated — gone). Restored from the last delivered zip, verified identical via `diff -r` before continuing. Standing discipline: diff every file (or the whole tree) against the last delivered zip before trusting it; discard-and-rewrite rather than adapt foreign code even when it looks correct; if the directory itself is gone, restore from the zip and re-verify before doing anything else. **Whoever continues this project should keep doing this** — especially around `store.py`.
 
 ## Key decisions worth not re-litigating
 
@@ -69,4 +81,6 @@ Files not written by me have repeatedly appeared already-populated in this sandb
 
 ## Suggested next step
 
-Continue auth at step 4 (signup/login endpoints in `main.py`, using the store methods from steps 1-3), or address the PII scrub (Phase 4 step 6) if the flywheel pipeline is more urgent than multi-tenancy right now.
+**Priority**: the frontend is currently broken against the backend (see Auth section — every `/v1/projects*` call now requires a bearer token the frontend never sends). Either continue straight through steps 10-12 (frontend login/token/401-handling) to fix this, or temporarily note it as a known-broken state if continuing with steps 7-9 (log scoping, migration, config) first. Don't leave this mid-state deployed.
+
+Otherwise: continue auth at step 7 (scope the request log), or address the PII scrub (Phase 4 step 6) if the flywheel pipeline is more urgent than finishing multi-tenancy right now.
