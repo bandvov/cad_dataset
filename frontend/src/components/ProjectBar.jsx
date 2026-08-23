@@ -4,9 +4,11 @@ export default function ProjectBar({
   projects,
   currentProjectId,
   currentProjectName,
+  currentUserEmail,
   onSwitch,
   onCreate,
   onDelete,
+  onLogout,
 }) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -72,6 +74,22 @@ export default function ProjectBar({
           </>
         )}
       </div>
+
+      {currentUserEmail && (
+        <div className="titlebar-user">
+          <span className="titlebar-user-email" title={currentUserEmail}>
+            {currentUserEmail}
+          </span>
+          <button
+            type="button"
+            className="titlebar-logout-btn"
+            onClick={onLogout}
+            title="Log out"
+          >
+            Log out
+          </button>
+        </div>
+      )}
     </div>
   );
 }
