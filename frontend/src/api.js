@@ -1,5 +1,11 @@
-const LLM_SERVICE_URL =
-  import.meta.env.VITE_LLM_SERVICE_URL || "http://localhost:8001";
+// Every server request goes through the same-origin /api prefix -- nginx
+// (prod) and Vite's dev server (see vite.config.js) both proxy /api/* to
+// llm-service, stripping the prefix before forwarding. This means the
+// browser never needs a directly-reachable llm-service URL baked into
+// the bundle (the old VITE_LLM_SERVICE_URL-at-build-time requirement --
+// see frontend/README.md's history), which also makes this work
+// correctly behind any reverse proxy/domain without a rebuild.
+const API_BASE = "/api";
 
 // ---- token storage (step 11) ----
 // App.jsx owns persistence (localStorage, same pattern as PROJECT_KEY) and
@@ -76,7 +82,7 @@ function arrayBufferToBase64(buffer) {
 // authFetch(), so a wrong-password 401 here is handled locally by
 // LoginPage/SignupPage's own error state, not the global handler above.
 export async function signup(email, password) {
-  const res = await fetch(`${LLM_SERVICE_URL}/v1/auth/signup`, {
+  const res = await fetch(`${API_BASE}/v1/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
@@ -85,7 +91,7 @@ export async function signup(email, password) {
 }
 
 export async function login(email, password) {
-  const res = await fetch(`${LLM_SERVICE_URL}/v1/auth/login`, {
+  const res = await fetch(`${API_BASE}/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
@@ -103,7 +109,7 @@ export async function login(email, password) {
  * for consistency.
  */
 export async function logout() {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/auth/logout`, {
+  const res = await authFetch(`${API_BASE}/v1/auth/logout`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -122,7 +128,7 @@ export async function logout() {
  *     file_b64?, content_type? }
  */
 export async function generatePart({ prompt, baseIr, maxAttempts = 3 }) {
-  const res = await fetch(`${LLM_SERVICE_URL}/v1/generate`, {
+  const res = await fetch(`${API_BASE}/v1/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -148,7 +154,7 @@ export async function generatePart({ prompt, baseIr, maxAttempts = 3 }) {
 // back to login (step 12) instead of surfacing as an opaque in-chat error.
 
 export async function createProject(name = "Untitled part") {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects`, {
+  const res = await authFetch(`${API_BASE}/v1/projects`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ name }),
@@ -157,14 +163,14 @@ export async function createProject(name = "Untitled part") {
 }
 
 export async function listProjects() {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects`, {
+  const res = await authFetch(`${API_BASE}/v1/projects`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
 }
 
 export async function deleteProject(projectId) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}`, {
     method: "DELETE",
     headers: authHeaders(),
   });
@@ -172,7 +178,7 @@ export async function deleteProject(projectId) {
 }
 
 export async function getProject(projectId) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}`, {
     headers: authHeaders(),
   });
   return handleResponse(res);
@@ -187,7 +193,7 @@ export async function getProject(projectId) {
  */
 export async function renderProject(projectId, format = "glb") {
   const res = await authFetch(
-    `${LLM_SERVICE_URL}/v1/projects/${projectId}/render?format=${format}`,
+    `${API_BASE}/v1/projects/${projectId}/render?format=${format}`,
     { headers: authHeaders() }
   );
   if (!res.ok) {
@@ -205,7 +211,7 @@ export async function renderProject(projectId, format = "glb") {
  */
 export async function downloadExport(projectId, format) {
   const res = await authFetch(
-    `${LLM_SERVICE_URL}/v1/projects/${projectId}/render?format=${format}`,
+    `${API_BASE}/v1/projects/${projectId}/render?format=${format}`,
     { headers: authHeaders() }
   );
   if (!res.ok) {
@@ -227,7 +233,7 @@ export async function downloadExport(projectId, format) {
  */
 export async function logDownload(projectId) {
   try {
-    await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}/log-download`, {
+    await authFetch(`${API_BASE}/v1/projects/${projectId}/log-download`, {
       method: "POST",
       headers: authHeaders(),
     });
@@ -237,7 +243,7 @@ export async function logDownload(projectId) {
 }
 
 export async function generateInProject({ projectId, prompt, maxAttempts = 3 }) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}/generate`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/generate`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ prompt, max_attempts: maxAttempts, export_format: "glb" }),
@@ -246,7 +252,7 @@ export async function generateInProject({ projectId, prompt, maxAttempts = 3 }) 
 }
 
 export async function undoProject(projectId) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}/undo?export_format=glb`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/undo?export_format=glb`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -254,7 +260,7 @@ export async function undoProject(projectId) {
 }
 
 export async function redoProject(projectId) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}/redo?export_format=glb`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/redo?export_format=glb`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -270,7 +276,7 @@ export async function redoProject(projectId) {
  * generate() failure, so callers can surface it the same way.
  */
 export async function applyEdit({ projectId, jsonIr }) {
-  const res = await authFetch(`${LLM_SERVICE_URL}/v1/projects/${projectId}/apply`, {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/apply`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ json_ir: jsonIr, export_format: "glb" }),

@@ -88,6 +88,7 @@ services:
       # auth step 9 -- see .env.example for what these control
       - SESSION_LIFETIME_HOURS=${SESSION_LIFETIME_HOURS:-}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+      - LLM_SERVICE_DEBUG=${LLM_SERVICE_DEBUG:-1}
     ports:
       - "${LLM_SERVICE_PORT:-8001}:8000"
     volumes:

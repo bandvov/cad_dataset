@@ -24,6 +24,14 @@ must match what build_dataset.py rendered at training time, or you
 reintroduce exactly the kind of train/serve skew bug this project already
 hit once (the "model" vs "assistant" role mismatch).
 
+DEBUGGING: set LLM_SERVICE_DEBUG=0 to silence the print()s below (on by
+default). They print straight to stdout/container logs, not through
+python's `logging` module -- deliberately simple since this is meant for
+"what is the model actually generating" visibility during development,
+not structured production logging. Long values (raw model output, full
+IR) are printed in full, not truncated, since truncating is exactly what
+you don't want while debugging a bad generation.
+
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
 service. `extract_json()` (the one dependency-free piece) was smoke-
@@ -33,12 +41,20 @@ llama.cpp + geometry service stack before trusting this in production.
 
 from __future__ import annotations
 import json
+import os
 import re
 from dataclasses import dataclass, field
 
 import httpx
 
 import chat_format
+
+_DEBUG = os.environ.get("LLM_SERVICE_DEBUG", "1") not in ("0", "false", "False", "")
+
+
+def _debug(*args) -> None:
+    if _DEBUG:
+        print(*args, flush=True)
 
 
 def extract_json(text: str) -> dict | None:
@@ -68,6 +84,27 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
+def _normalize_ir(ir: dict) -> dict:
+    """Best-effort fix for near-miss root keys the model sometimes emits
+    instead of schema.py's actual field name -- cheap to rewrite here
+    rather than spend a whole compile+repair round trip (and a retry
+    attempt) on something this mechanical. Deliberately narrow: only
+    rewrites the unambiguous {"part": "part", "features": [...]} case
+    (the model confusing the field name with its own value), never
+    touches "operation" when it's already present, and never recurses
+    into feature-level fields (Extrude/Revolve etc. also use the key
+    "operation" for ADD/SUBTRACT/INTERSECT -- a different meaning at a
+    different level, not something to alias)."""
+    if not isinstance(ir, dict) or "operation" in ir:
+        return ir
+    if ir.get("part") == "part" and isinstance(ir.get("features"), list):
+        ir = dict(ir)
+        del ir["part"]
+        ir["operation"] = "part"
+        _debug("[orchestrator] normalized root key 'part' -> 'operation'")
+    return ir
+
+
 @dataclass
 class GenerateResult:
     success: bool
@@ -92,14 +129,21 @@ class Orchestrator:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        _debug(f"[orchestrator] <<< raw model output ({len(content)} chars):\n{content}")
+        return content
 
     async def _compile(self, client: httpx.AsyncClient, ir: dict) -> dict:
         resp = await client.post(
             f"{self.geometry_url}/v1/compile", json={"json_ir": ir}, timeout=self.http_timeout,
         )
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        if result.get("valid"):
+            _debug(f"[orchestrator] compile OK -- stats={result.get('stats')}")
+        else:
+            _debug(f"[orchestrator] compile FAILED -- {result.get('error_type')}: {result.get('error')}")
+        return result
 
     async def generate_stream(self, prompt: str, base_ir: dict | None = None,
                                max_attempts: int = 3):
@@ -120,6 +164,9 @@ class Orchestrator:
         else:
             user_turn = chat_format.render_generate_user_turn(prompt)
 
+        _debug(f"[orchestrator] === generate start === prompt={prompt!r} "
+               f"base_ir={'yes' if base_ir is not None else 'no'} max_attempts={max_attempts}")
+
         yield {"event": "start", "max_attempts": max_attempts}
 
         messages = [{"role": "user", "content": user_turn}]
@@ -130,10 +177,12 @@ class Orchestrator:
         async with httpx.AsyncClient() as client:
             for attempt in range(1, max_attempts + 1):
                 yield {"event": "attempt_start", "attempt": attempt, "max_attempts": max_attempts}
+                _debug(f"[orchestrator] --- attempt {attempt}/{max_attempts} ---")
 
                 try:
                     raw = await self._chat(client, messages)
                 except httpx.HTTPError as e:
+                    _debug(f"[orchestrator] LLM request failed: {e}")
                     yield {"event": "failure", "attempts": attempt, "json_ir": last_ir,
                            "error": f"llm request failed: {e}", "conversation": conversation}
                     return
@@ -143,8 +192,11 @@ class Orchestrator:
                 yield {"event": "llm_response", "attempt": attempt, "content": raw}
 
                 ir = extract_json(raw)
+                if ir is not None:
+                    ir = _normalize_ir(ir)
                 if ir is None:
                     last_error = "model output was not valid JSON"
+                    _debug(f"[orchestrator] JSON parse FAILED: {last_error}")
                     yield {"event": "attempt_failed", "attempt": attempt,
                            "error_type": "ParseError", "error": last_error}
                     repair_turn = (
@@ -154,15 +206,20 @@ class Orchestrator:
                     )
                 else:
                     last_ir = ir
+                    n_features = len(ir.get("features", []))
+                    _debug(f"[orchestrator] parsed IR OK -- {n_features} feature(s):\n"
+                           f"{json.dumps(ir, indent=2)}")
                     yield {"event": "validating", "attempt": attempt}
                     try:
                         result = await self._compile(client, ir)
                     except httpx.HTTPError as e:
+                        _debug(f"[orchestrator] geometry service request failed: {e}")
                         yield {"event": "failure", "attempts": attempt, "json_ir": ir,
                                "error": f"geometry service request failed: {e}",
                                "conversation": conversation}
                         return
                     if result.get("valid"):
+                        _debug(f"[orchestrator] === generate SUCCESS on attempt {attempt} ===")
                         yield {"event": "success", "attempts": attempt, "json_ir": ir,
                                "stats": result.get("stats"), "conversation": conversation}
                         return
@@ -174,8 +231,11 @@ class Orchestrator:
                 messages.append({"role": "user", "content": repair_turn})
                 conversation.append({"role": "user", "content": repair_turn})
                 if attempt < max_attempts:
+                    _debug(f"[orchestrator] repairing -- feeding error back for attempt {attempt + 1}")
                     yield {"event": "repairing", "attempt": attempt, "next_attempt": attempt + 1}
 
+        _debug(f"[orchestrator] === generate FAILURE -- exhausted {max_attempts} attempts. "
+               f"last_error={last_error!r} ===")
         yield {"event": "failure", "attempts": max_attempts, "json_ir": last_ir,
                "error": last_error, "conversation": conversation}
 
@@ -210,7 +270,10 @@ class Orchestrator:
                 timeout=self.http_timeout,
             )
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        _debug(f"[orchestrator] compile_only -- valid={result.get('valid')} "
+               f"error={result.get('error')}")
+        return result
 
     async def export(self, ir: dict, fmt: str) -> tuple[bytes, str, dict] | None:
         """Returns (file_bytes, content_type, stats) or None on failure."""
@@ -220,6 +283,7 @@ class Orchestrator:
                 timeout=self.http_timeout,
             )
         if resp.status_code != 200:
+            _debug(f"[orchestrator] export FAILED -- status={resp.status_code}")
             return None
         stats = json.loads(resp.headers.get("X-Geometry-Stats", "{}"))
         return resp.content, resp.headers.get("content-type", "application/octet-stream"), stats
