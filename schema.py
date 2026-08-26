@@ -6,12 +6,25 @@ compiler and generators can never silently drift apart on field names.
 
 IR shape:
 {
-  "operation": "part",
   "features": [ {feature}, {feature}, ... ]
 }
 
 Every feature has: "id" (unique str) and "feature_type" (one of FEATURE_TYPES).
 See FEATURE_SPECS below for required/optional fields per type.
+
+NOTE ON THE (removed) ROOT "operation" FIELD: earlier versions of this
+schema required a root {"operation": "part", "features": [...]} shape.
+That field was dropped -- it never varied (there was only ever one kind
+of document), nothing past validate_ir() ever read it, and it turned out
+to be the single most common thing a fine-tuned model got wrong (emitting
+the value as the key instead of the key itself: {"part": "part"}). A
+root-level type discriminator only earns its keep when two possible
+document shapes could be structurally ambiguous; a future assembly format
+(see root README.md's "Known limitations") would have its own "bodies"
+key at the root with each body's own nested "features" list, which is
+already unambiguous against this shape without any extra tag. validate_ir()
+below silently ignores an "operation" key if one is still present (old
+generated data, old stored project versions), so nothing needs migrating.
 """
 
 from __future__ import annotations
@@ -85,6 +98,10 @@ FEATURE_TYPES = {
 
 # Feature types that consume/produce full solid geometry and combine into
 # the running part via a boolean "operation" (default ADD if omitted).
+# NOTE: this is a PER-FEATURE field (Extrude.operation, Mirror.operation,
+# etc. -- ADD/SUBTRACT/INTERSECT), unrelated to the removed root-level
+# "operation" field discussed in the module docstring above. Same key
+# name, different level, different meaning -- don't conflate them.
 SOLID_PRODUCING = {
     "Extrude", "Revolve", "Loft", "Sweep", "Mirror", "LinearPattern", "CircularPattern",
 }
@@ -214,9 +231,14 @@ def validate_ir(ir: dict) -> None:
     """Structural validation only (field presence / id references).
     Does NOT check geometric validity -- that requires actual execution,
     see executor.py / validator.py.
+
+    Root shape is just {"features": [...]} -- see the module docstring
+    for why the old root "operation": "part" requirement was dropped.
+    Any extra/legacy top-level keys (including an old "operation" or a
+    model's malformed "part") are simply never inspected here, so old
+    stored/generated data with the old key still validates fine without
+    a migration.
     """
-    if ir.get("operation") != "part":
-        raise SchemaError("root 'operation' must be 'part'")
     features = ir.get("features")
     if not isinstance(features, list) or not features:
         raise SchemaError("'features' must be a non-empty list")

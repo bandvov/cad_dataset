@@ -179,7 +179,7 @@ def build_from_recipe(recipe: dict) -> tuple[dict, str, int]:
         instr = f"{desc[0].upper()}{desc[1:]}, then {', then '.join(step_descs)}."
     else:
         instr = desc[0].upper() + desc[1:] + "."
-    return {"operation": "part", "features": features}, instr, len(features)
+    return {"features": features}, instr, len(features)
 
 
 def generate(n: int, min_extra=1, max_extra=6, seed: int = 0):

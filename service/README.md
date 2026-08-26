@@ -50,7 +50,6 @@ build123d install and a genuinely simple part first.
 ```bash
 curl -X POST localhost:8000/v1/compile -H "Content-Type: application/json" -d '{
   "json_ir": {
-    "operation": "part",
     "features": [
       {"id": "sketch_1", "feature_type": "Sketch", "primitives": [
         {"type": "Rectangle", "parameters": {"width": 40, "height": 30, "position": [0,0], "rotation": 0, "mode": "ADD"}}]},
@@ -78,8 +77,8 @@ generate IR from model
   -> POST /v1/compile
   -> if valid: done, optionally POST /v1/export for the deliverable
   -> if invalid: feed {error_type, error} back to the model as a repair
-     turn (this is exactly the shape gen_repair.py trained the model on),
-     retry, cap at ~2-3 attempts
+     turn (this is exactly the shape gen_repair.py trained the model to
+     handle), retry, cap at ~2-3 attempts
   -> if still invalid: surface a clear failure to the user
 ```
 

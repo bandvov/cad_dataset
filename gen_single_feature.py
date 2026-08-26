@@ -51,7 +51,7 @@ def gen_extrude(rng: random.Random) -> Record:
     w, h = rnd("med_dim", rng), rnd("med_dim", rng)
     amount = rnd("extrude_med", rng)
     sk_id, ex_id = idgen.next("sketch"), idgen.next("extrude")
-    ir = {"operation": "part", "features": [
+    ir = {"features": [
         {"id": sk_id, "feature_type": "Sketch", "primitives": [
             {"type": "Rectangle", "parameters": {"width": w, "height": h, "position": [0, 0],
                                                    "rotation": 0, "mode": "ADD"}}]},
@@ -67,7 +67,7 @@ def gen_revolve(rng: random.Random) -> Record:
     h = rnd("med_dim", rng)
     sk_id, rv_id = idgen.next("sketch"), idgen.next("revolve")
     # profile: rectangle offset from the revolve axis (Y axis at x=0)
-    ir = {"operation": "part", "features": [
+    ir = {"features": [
         {"id": sk_id, "feature_type": "Sketch", "primitives": [
             {"type": "Rectangle", "parameters": {"width": r * 0.4, "height": h,
                                                    "position": [r, 0], "rotation": 0, "mode": "ADD"}}]},
@@ -84,7 +84,7 @@ def gen_loft(rng: random.Random) -> Record:
     top_r = rnd("small_dim", rng)
     stack_h = rnd("extrude_med", rng)
     sk1, sk2, lf = idgen.next("sketch"), idgen.next("sketch"), idgen.next("loft")
-    ir = {"operation": "part", "features": [
+    ir = {"features": [
         {"id": sk1, "feature_type": "Sketch", "plane": {"origin": [0, 0, 0], "normal": [0, 0, 1]},
          "primitives": [{"type": "Rectangle",
                           "parameters": {"width": w, "height": h, "position": [0, 0],
@@ -105,7 +105,7 @@ def gen_sweep(rng: random.Random) -> Record:
     pts = [[round(rng.uniform(-80, 80), 1), round(rng.uniform(-80, 80), 1), round(rng.uniform(0, 40), 1)]
            for _ in range(4)]
     prof, path, sw = idgen.next("sketch"), idgen.next("sketch"), idgen.next("sweep")
-    ir = {"operation": "part", "features": [
+    ir = {"features": [
         {"id": path, "feature_type": "Sketch", "primitives": [
             {"type": "Spline", "parameters": {"points": pts}}]},
         {"id": prof, "feature_type": "Sketch",
@@ -131,7 +131,7 @@ def gen_fillet(rng: random.Random) -> Record:
         "radius": r,
     })
     instr = phrase_instruction(f"a plate with a {r}mm fillet on the top edges", "rounded top perimeter", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def gen_chamfer(rng: random.Random) -> Record:
@@ -145,7 +145,7 @@ def gen_chamfer(rng: random.Random) -> Record:
         "length": length,
     })
     instr = phrase_instruction(f"a plate with a {length}mm chamfer on the top edges", "beveled top perimeter", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def gen_shell(rng: random.Random) -> Record:
@@ -158,7 +158,7 @@ def gen_shell(rng: random.Random) -> Record:
         "open_selector": {"of": "faces", "filter_by": "Z", "criterion": "max"},
     })
     instr = phrase_instruction(f"a hollow box, wall thickness {thickness}mm, open on top", "shelled enclosure", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def RANGES_wall(rng: random.Random) -> float:
@@ -185,7 +185,7 @@ def gen_hole(rng: random.Random, style: str) -> Record:
         hole_feat["cs_angle"] = 90
     features.append(hole_feat)
     instr = phrase_instruction(f"a plate with a {style} hole, radius {radius}mm", f"depth {depth}mm", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def gen_mirror(rng: random.Random) -> Record:
@@ -194,7 +194,7 @@ def gen_mirror(rng: random.Random) -> Record:
     mid = idgen.next("mirror")
     features.append({"id": mid, "feature_type": "Mirror", "plane": "YZ", "operation": "ADD"})
     instr = phrase_instruction("a plate mirrored across the YZ plane", "symmetric doubled block", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def gen_linear_pattern(rng: random.Random) -> Record:
@@ -208,7 +208,7 @@ def gen_linear_pattern(rng: random.Random) -> Record:
         "direction": [1, 0, 0], "count": count, "spacing": spacing, "operation": "ADD",
     })
     instr = phrase_instruction(f"{count} plates in a linear array spaced {spacing}mm apart", "repeated block feature", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 def gen_circular_pattern(rng: random.Random) -> Record:
@@ -221,7 +221,7 @@ def gen_circular_pattern(rng: random.Random) -> Record:
         "axis": {"origin": [w, 0, 0], "direction": [0, 0, 1]}, "count": count, "angle": 360,
     })
     instr = phrase_instruction(f"{count} plates arranged in a circular pattern", "radially repeated feature", rng)
-    return Record("generate", instr, {"operation": "part", "features": features}, complexity=2)
+    return Record("generate", instr, {"features": features}, complexity=2)
 
 
 GENERATORS = {

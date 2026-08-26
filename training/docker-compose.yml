@@ -11,7 +11,7 @@ services:
       - MODEL_ID=${MODEL_ID:-google/gemma-4-E4B-it}
       - TRAIN_FILE=/workspace/data/train.jsonl
       - VAL_FILE=/workspace/data/val.jsonl
-      - OUTPUT_DIR=/workspace/outputs/adapter
+      - OUTPUT_DIR=/workspace/outputs/adapter/${MODEL_ID}
       - CAD_DATASET_PATH=/workspace/cad_dataset
       - USE_QLORA=${USE_QLORA:-1}
       - LORA_R=${LORA_R:-16}
@@ -70,7 +70,7 @@ services:
     entrypoint: ["python", "merge_adapter.py"]
     command:
       - "--base-model=${MODEL_ID:-google/gemma-4-E4B-it}"
-      - "--adapter-dir=/workspace/outputs/adapter"
+      - "--adapter-dir=/workspace/outputs/adapter/${MODEL_ID}"
       - "--output-dir=/workspace/outputs/merged"
 
   compare:

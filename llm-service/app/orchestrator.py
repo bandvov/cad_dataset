@@ -32,6 +32,15 @@ not structured production logging. Long values (raw model output, full
 IR) are printed in full, not truncated, since truncating is exactly what
 you don't want while debugging a bad generation.
 
+NOTE on the removed root "operation" normalization: an earlier version of
+this file patched around the model emitting {"part": "part", ...} instead
+of the schema's root shape by rewriting the key here. That's no longer
+needed -- schema.py dropped the root "operation" requirement entirely
+(see its module docstring), so a stray "part" key, or no root
+discriminator at all, is now just an unrecognized extra key that
+validate_ir() never looks at. Fixing the root cause in the schema made
+this file's patch dead code; removed rather than left around.
+
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
 service. `extract_json()` (the one dependency-free piece) was smoke-
@@ -57,11 +66,44 @@ def _debug(*args) -> None:
         print(*args, flush=True)
 
 
+# Gemma 4's own native structured-output convention uses control tokens
+# instead of plain JSON punctuation -- <|"|> delimits string values
+# (unquoted keys) in its tool-call/structured-data format. That's a
+# DIFFERENT convention from the plain-JSON-as-text this project trains
+# for, and it's a documented source of mangled JSON when it leaks through
+# anyway (see e.g. ggml-org/llama.cpp#21384, vllm-project/vllm#38946 --
+# same <|"|> leakage corrupting quote placement in other Gemma 4
+# deployments, not something specific to this pipeline). If any of these
+# ever show up as literal text in a completion (llama.cpp/training decode
+# not stripping them, or the base model's habit winning out over the
+# LoRA), un-corrupt rather than discard -- <|"|> IS a quote character by
+# definition, so replacing it with one is a correction, not a guess.
+# Channel/tool-call wrapper tokens are stripped outright since nothing in
+# this pipeline's prompts asks for thinking or tool use.
+_GEMMA4_LEAK_PATTERNS = [
+    ('<|"|>', '"'),
+    ("<|tool_call>", ""), ("<tool_call|>", ""),
+    ("<|tool_response>", ""), ("<tool_response|>", ""),
+    ("<|tool>", ""), ("<tool|>", ""),
+    ("<|channel>", ""), ("<channel|>", ""),
+]
+
+
+def _strip_gemma4_leaks(text: str) -> str:
+    cleaned = text
+    for token, replacement in _GEMMA4_LEAK_PATTERNS:
+        if token in cleaned:
+            cleaned = cleaned.replace(token, replacement)
+    if cleaned != text:
+        _debug(f"[orchestrator] stripped leaked Gemma 4 control token(s) from raw output")
+    return cleaned
+
+
 def extract_json(text: str) -> dict | None:
     """The model was trained to emit raw JSON with nothing else, but
     sampling can still occasionally wrap it in markdown fences or add
     stray text -- try increasingly permissive extraction before giving up."""
-    text = text.strip()
+    text = _strip_gemma4_leaks(text.strip())
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -82,27 +124,6 @@ def extract_json(text: str) -> dict | None:
             pass
 
     return None
-
-
-def _normalize_ir(ir: dict) -> dict:
-    """Best-effort fix for near-miss root keys the model sometimes emits
-    instead of schema.py's actual field name -- cheap to rewrite here
-    rather than spend a whole compile+repair round trip (and a retry
-    attempt) on something this mechanical. Deliberately narrow: only
-    rewrites the unambiguous {"part": "part", "features": [...]} case
-    (the model confusing the field name with its own value), never
-    touches "operation" when it's already present, and never recurses
-    into feature-level fields (Extrude/Revolve etc. also use the key
-    "operation" for ADD/SUBTRACT/INTERSECT -- a different meaning at a
-    different level, not something to alias)."""
-    if not isinstance(ir, dict) or "operation" in ir:
-        return ir
-    if ir.get("part") == "part" and isinstance(ir.get("features"), list):
-        ir = dict(ir)
-        del ir["part"]
-        ir["operation"] = "part"
-        _debug("[orchestrator] normalized root key 'part' -> 'operation'")
-    return ir
 
 
 @dataclass
@@ -192,8 +213,6 @@ class Orchestrator:
                 yield {"event": "llm_response", "attempt": attempt, "content": raw}
 
                 ir = extract_json(raw)
-                if ir is not None:
-                    ir = _normalize_ir(ir)
                 if ir is None:
                     last_error = "model output was not valid JSON"
                     _debug(f"[orchestrator] JSON parse FAILED: {last_error}")

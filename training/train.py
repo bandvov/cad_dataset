@@ -4,22 +4,40 @@ QLoRA supervised fine-tuning of Gemma 4 on the cad_dataset chat-completion
 jsonl files (train.jsonl / val.jsonl, each record:
 {"prompt": [{"role": "user", ...}], "completion": [{"role": "assistant", ...}]}).
 
-API NOTE (read this if you hit an ImportError): earlier versions of this
-script used `trl.DataCollatorForCompletionOnlyLM`, which trl has REMOVED
-(not renamed -- the class is gone). The replacement isn't a drop-in
-collator swap, it's a dataset-shape change: trl now wants separate
-"prompt"/"completion" columns (each a list of chat messages) instead of one
-merged "messages" list + a response-template string to search for inside
-the rendered text. `build_dataset.py` already writes this shape. With that
-shape, `SFTConfig(completion_only_loss=True)` (the default when the
-dataset has prompt/completion columns) handles the masking internally --
-no custom collator, no response_template/instruction_template strings to
-keep in sync with your tokenizer's exact turn markers, no dataset_text_field.
+API NOTE (read this if you hit an ImportError or a TypeError building
+SFTConfig): earlier versions of this script used
+`trl.DataCollatorForCompletionOnlyLM`, which trl has REMOVED (not renamed
+-- the class is gone). The replacement isn't a drop-in collator swap,
+it's a dataset-shape change: trl now wants separate "prompt"/"completion"
+columns (each a list of chat messages) instead of one merged "messages"
+list + a response-template string to search for inside the rendered
+text. `build_dataset.py` already writes this shape. With that shape,
+`SFTConfig(completion_only_loss=True)` (the default when the dataset has
+prompt/completion columns) handles the masking internally -- no custom
+collator, no response_template/instruction_template strings to keep in
+sync with your tokenizer's exact turn markers, no dataset_text_field.
 This is meaningfully more robust than the old approach: the old collator
 worked by *finding a literal substring* in rendered text, which silently
 breaks if the chat template ever renders turn markers slightly differently
 than you assumed. See training/README.md for the trl version this was
 written against and what to check if trl's API has moved again since.
+
+SFTConfig's accepted FIELDS have also moved across trl versions (this is
+the same class of drift, not a one-off): on the trl version this was
+last run against, `warmup_ratio` doesn't exist -- it was renamed to
+`warmup_steps` (a step count, not a fraction of total steps). This file
+still exposes `--warmup-ratio`/`WARMUP_RATIO` as the user-facing knob
+(a ratio is a more portable thing to configure than a raw step count
+across different dataset sizes/batch sizes), and converts it to
+`warmup_steps` itself via `_compute_warmup_steps()` before ever touching
+`SFTConfig`. `_build_sft_config()` still does defensive field-introspection
+on top of that, in case trl's accepted fields move again beyond this one
+already-confirmed rename -- if you see a
+"[train.py] SFTConfig on this trl version does not accept: [...]" line at
+startup, whatever's listed there is NOT being applied to this run; check
+`python -c "from trl import SFTConfig; help(SFTConfig)"` inside the
+container for the current field name/replacement before trusting the
+default.
 
 Key choices:
   * packing=False, always. Each example is one complete JSON IR document;
@@ -39,8 +57,10 @@ before committing to a full run.
 
 from __future__ import annotations
 import argparse
+import dataclasses
 import gc
 import json
+import math
 import os
 import random
 import sys
@@ -58,6 +78,7 @@ from trl import SFTConfig, SFTTrainer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_geometry import evaluate_completions
+from transformers.trainer_utils import get_last_checkpoint
 
 
 def env(key, default=None, cast=str):
@@ -145,6 +166,58 @@ def _print_template_sample(dataset, tokenizer):
     print("CHAT TEMPLATE SAMPLE -- verify this looks right before trusting a full run:")
     print(rendered[:1500])
     print("=" * 70)
+
+
+def _compute_warmup_steps(n_train_examples: int, per_device_batch_size: int,
+                           grad_accum: int, num_epochs: float, warmup_ratio: float) -> int:
+    """Converts the user-facing --warmup-ratio into a step count, since
+    this trl version's SFTConfig takes warmup_steps, not warmup_ratio --
+    see the module docstring's API NOTE. Assumes a single process (this
+    project's docker-compose runs train.py directly, no torchrun/
+    accelerate multi-process launch) -- adjust the total_batch computation
+    if you later run this under a multi-GPU launcher. Exactness doesn't
+    matter here (a handful of steps either way has no meaningful effect
+    on a warmup schedule); this only needs to be in the right ballpark."""
+    total_batch = max(1, per_device_batch_size * grad_accum)
+    steps_per_epoch = max(1, math.ceil(n_train_examples / total_batch))
+    total_steps = max(1, round(steps_per_epoch * num_epochs))
+    return max(0, round(total_steps * warmup_ratio))
+
+
+def _build_sft_config(**kwargs) -> SFTConfig:
+    """Constructs SFTConfig defensively against trl's field set moving
+    between versions -- see the module docstring's API NOTE. Introspects
+    the INSTALLED SFTConfig's actual dataclass fields (SFTConfig, like
+    transformers.TrainingArguments, is a @dataclass, so its __init__
+    signature is exactly its field list -- more reliable to check than
+    inspect.signature on a generated __init__) and only passes kwargs it
+    recognizes. Anything dropped is printed clearly, once, at startup --
+    silently ignoring an unsupported warmup_ratio (or any other field)
+    would change how the run actually trains without telling you."""
+    accepted = {f.name for f in dataclasses.fields(SFTConfig)}
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    dropped = {k: v for k, v in kwargs.items() if k not in accepted}
+
+    if dropped:
+        print(f"[train.py] WARNING: this trl version's SFTConfig does not accept "
+              f"{sorted(dropped)} -- these settings are NOT applied to this run. "
+              f"Run `python -c \"from trl import SFTConfig; help(SFTConfig)\"` inside "
+              f"the container to find the current field name/replacement for any of "
+              f"these that matter to you (e.g. warmup_ratio, lr_scheduler_type) before "
+              f"trusting the schedule this run actually uses.")
+
+    if "output_dir" not in filtered:
+        # if even this is missing, SFTConfig has changed shape more than a
+        # dropped-kwarg workaround can paper over -- stop rather than train
+        # into a directory nobody configured
+        raise RuntimeError(
+            "SFTConfig on this trl version doesn't accept 'output_dir' at all -- "
+            "this is a bigger API change than a few renamed fields. Check trl's "
+            "current SFTConfig source/docs before proceeding; _build_sft_config() "
+            "in train.py can't safely guess a replacement for this one."
+        )
+
+    return SFTConfig(**filtered)
 
 
 def _free_memory(tag: str = "", verbose: bool = True):
@@ -348,14 +421,25 @@ def main():
 
     reconciled_save_steps = _reconcile_save_eval_steps(args.save_steps, args.eval_steps)
 
-    sft_config = SFTConfig(
+    warmup_steps = _compute_warmup_steps(
+        n_train_examples=len(raw["train"]), per_device_batch_size=args.per_device_batch_size,
+        grad_accum=args.grad_accum, num_epochs=args.num_epochs, warmup_ratio=args.warmup_ratio,
+    )
+    print(f"[train.py] warmup_ratio={args.warmup_ratio} -> warmup_steps={warmup_steps} "
+          f"(from {len(raw['train'])} train examples, batch {args.per_device_batch_size}, "
+          f"grad_accum {args.grad_accum}, {args.num_epochs} epochs)")
+
+    # See _build_sft_config()'s docstring / the module's API NOTE: this
+    # trl version's SFTConfig takes warmup_steps, not warmup_ratio, so the
+    # ratio is converted above rather than passed straight through.
+    sft_config = _build_sft_config(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         per_device_eval_batch_size=args.per_device_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_epochs,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=warmup_steps,
         logging_steps=args.logging_steps,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
@@ -391,7 +475,13 @@ def main():
 
     resume = args.resume_from_checkpoint or None  # "" from an unset .env var != no resume
     if resume == "auto":
-        resume = True  # transformers auto-detects the latest checkpoint in output_dir
+        resume = get_last_checkpoint(args.output_dir)
+
+        if resume:
+            print(f"Resuming from checkpoint: {resume}")
+        else:
+            print("No checkpoint found; starting fresh training.")
+            resume = None
     trainer.train(resume_from_checkpoint=resume)
 
     # unload once more before saving: training's optimizer states (2x
