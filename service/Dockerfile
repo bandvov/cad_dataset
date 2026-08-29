@@ -14,7 +14,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglu1-mesa \
+        fontconfig \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+
+ENV HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache \
+    FONTCONFIG_PATH=/etc/fonts
+
+RUN mkdir -p /tmp/.cache/fontconfig && fc-cache -f
 
 WORKDIR /app
 

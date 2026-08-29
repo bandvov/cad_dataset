@@ -47,7 +47,7 @@ function makeMessage(role, content, extra = {}) {
 
 const GREETING = makeMessage(
   "assistant",
-  "Describe a part and I'll generate it — then tell me what to change and I'll edit it in place."
+  "Describe a part and I'll generate it — then tell me what to change and I'll edit it in place.",
 );
 
 export default function App() {
@@ -93,17 +93,23 @@ export default function App() {
     setAuthRestored(true);
   }, [applyAuth]);
 
-  const handleLogin = useCallback(async (email, password) => {
-    const { token, user } = await login(email, password);
-    setSessionExpired(false);
-    applyAuth(token, user);
-  }, [applyAuth]);
+  const handleLogin = useCallback(
+    async (email, password) => {
+      const { token, user } = await login(email, password);
+      setSessionExpired(false);
+      applyAuth(token, user);
+    },
+    [applyAuth],
+  );
 
-  const handleSignup = useCallback(async (email, password) => {
-    const { token, user } = await signup(email, password);
-    setSessionExpired(false);
-    applyAuth(token, user);
-  }, [applyAuth]);
+  const handleSignup = useCallback(
+    async (email, password) => {
+      const { token, user } = await signup(email, password);
+      setSessionExpired(false);
+      applyAuth(token, user);
+    },
+    [applyAuth],
+  );
 
   // Shared by an explicit logout and a global 401: drops auth state, the
   // persisted token, and every piece of project state tied to that
@@ -202,8 +208,13 @@ export default function App() {
     if (proj.current) {
       setJsonIr(proj.current.json_ir);
       setStats(proj.current.stats ?? null);
-      const glb = await renderProject(id);
-      setGlbBase64(glb);
+      try {
+        const glb = await renderProject(id);
+        setGlbBase64(glb);
+      } catch (err) {
+        console.error("renderProject failed on restore:", err);
+        setGlbBase64(null); // tree/stats still show, viewport shows empty state instead of stale model
+      }
     } else {
       setJsonIr(null);
       setStats(null);
@@ -284,7 +295,7 @@ export default function App() {
               `Couldn't produce a valid part: ${
                 result.error ?? "unknown error"
               }`,
-              { isError: true }
+              { isError: true },
             ),
           ]);
         }
@@ -299,7 +310,7 @@ export default function App() {
         setIsLoading(false);
       }
     },
-    [ensureProject, refreshHistory]
+    [ensureProject, refreshHistory],
   );
 
   const applyVersion = useCallback((version) => {
@@ -317,12 +328,17 @@ export default function App() {
       await refreshHistory(projectId);
       setMessages((prev) => [
         ...prev,
-        makeMessage("assistant", `Reverted to version ${version.version_index + 1}.`),
+        makeMessage(
+          "assistant",
+          `Reverted to version ${version.version_index + 1}.`,
+        ),
       ]);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        makeMessage("assistant", `Undo failed: ${err.message}`, { isError: true }),
+        makeMessage("assistant", `Undo failed: ${err.message}`, {
+          isError: true,
+        }),
       ]);
     } finally {
       setIsLoading(false);
@@ -338,12 +354,17 @@ export default function App() {
       await refreshHistory(projectId);
       setMessages((prev) => [
         ...prev,
-        makeMessage("assistant", `Reapplied version ${version.version_index + 1}.`),
+        makeMessage(
+          "assistant",
+          `Reapplied version ${version.version_index + 1}.`,
+        ),
       ]);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        makeMessage("assistant", `Redo failed: ${err.message}`, { isError: true }),
+        makeMessage("assistant", `Redo failed: ${err.message}`, {
+          isError: true,
+        }),
       ]);
     } finally {
       setIsLoading(false);
@@ -367,13 +388,16 @@ export default function App() {
         await refreshHistory(projectId);
         setMessages((prev) => [
           ...prev,
-          makeMessage("assistant", `Applied edit. (v${result.version_index + 1})`),
+          makeMessage(
+            "assistant",
+            `Applied edit. (v${result.version_index + 1})`,
+          ),
         ]);
       } finally {
         setIsLoading(false);
       }
     },
-    [projectId, refreshHistory]
+    [projectId, refreshHistory],
   );
 
   // Export/download (the other Phase-2-adjacent gap): triggers an actual
@@ -402,7 +426,7 @@ export default function App() {
         ]);
       }
     },
-    [projectId]
+    [projectId],
   );
 
   const handleCreateProject = useCallback(async () => {
@@ -443,12 +467,12 @@ export default function App() {
         setIsLoading(false);
       }
     },
-    [projectId, isLoading, loadProject]
+    [projectId, isLoading, loadProject],
   );
 
   const handleDeleteProject = useCallback(
     async (id) => {
-      if (!window.confirm("Delete this part? This can't be undone.")) return;
+      if (!window.confirm("Delete this part? This can&apos;t be undone.")) return;
       try {
         await deleteProject(id);
         setProjects((prev) => prev.filter((p) => p.id !== id));
@@ -461,13 +485,17 @@ export default function App() {
       } catch (err) {
         setMessages((prev) => [
           ...prev,
-          makeMessage("assistant", `Couldn't delete that part: ${err.message}`, {
-            isError: true,
-          }),
+          makeMessage(
+            "assistant",
+            `Couldn't delete that part: ${err.message}`,
+            {
+              isError: true,
+            },
+          ),
         ]);
       }
     },
-    [projectId, clearPartState]
+    [projectId, clearPartState],
   );
 
   // ---- auth gate: everything above this is still just hook setup, no
@@ -523,7 +551,11 @@ export default function App() {
           hasPart={jsonIr !== null}
           onDownload={handleDownload}
         />
-        <ChatPanel messages={messages} onSend={handleSend} isLoading={isLoading} />
+        <ChatPanel
+          messages={messages}
+          onSend={handleSend}
+          isLoading={isLoading}
+        />
       </div>
     </div>
   );
