@@ -88,6 +88,11 @@ class IRCompiler:
         bd = self.bd
         if not plane_spec:
             return bd.Plane.XY
+        if not isinstance(plane_spec, dict):
+            raise CompileError(
+                f"'plane' must be an object with 'origin'/'normal', "
+                f"got {type(plane_spec).__name__}: {plane_spec!r}"
+            )
         origin = tuple(plane_spec.get("origin", (0, 0, 0)))
         normal = tuple(plane_spec.get("normal", (0, 0, 1)))
         return bd.Plane(origin=origin, z_dir=normal)

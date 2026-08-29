@@ -282,6 +282,12 @@ def validate_ir(ir: dict) -> None:
                 raise SchemaError(f"{ftype} '{fid}' references undefined/forward '{rf}'={feat[rf]}")
 
         if ftype == "Sketch":
+            plane = feat.get("plane")
+            if plane is not None and not isinstance(plane, dict):
+                raise SchemaError(
+                    f"Sketch '{fid}'.plane must be an object with 'origin'/'normal', "
+                    f"got {type(plane).__name__}"
+                )
             for p_i, prim in enumerate(feat["primitives"]):
                 ptype = prim.get("type")
                 if ptype not in SKETCH_PRIMITIVE_TYPES:
