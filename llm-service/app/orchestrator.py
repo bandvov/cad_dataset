@@ -41,6 +41,19 @@ discriminator at all, is now just an unrecognized extra key that
 validate_ir() never looks at. Fixing the root cause in the schema made
 this file's patch dead code; removed rather than left around.
 
+NOTE on export() error handling: an earlier version of export() swallowed
+the geometry service's real error_type/error on a non-200 response and
+just returned None -- callers (main.py's project_render, _export_field,
+etc.) then had nothing to show but a generic "export failed" 422, even
+though the geometry service (service/app/main.py's /v1/export) always
+raises a proper HTTPException(422, detail={"error_type", "error"}) with
+the actual cause (a BoundsError/CompileError because the stored IR no
+longer validates, or a genuine ExportError from build123d's
+export_step/export_stl/export_gltf call itself). export() now raises
+ExportFailed carrying that detail through instead of discarding it --
+callers must catch ExportFailed and surface .error_type/.error rather
+than assuming a bare None means "something went wrong, no further info."
+
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
 service. `extract_json()` (the one dependency-free piece) was smoke-
@@ -64,6 +77,20 @@ _DEBUG = os.environ.get("LLM_SERVICE_DEBUG", "1") not in ("0", "false", "False",
 def _debug(*args) -> None:
     if _DEBUG:
         print(*args, flush=True)
+
+
+class ExportFailed(Exception):
+    """Raised by Orchestrator.export() on a non-200 from the geometry
+    service's /v1/export, carrying its real error_type/error through
+    instead of the caller getting a bare None with no way to tell a
+    BoundsError apart from a genuine ExportError. See module docstring's
+    NOTE on export() error handling for why this replaced return-None."""
+
+    def __init__(self, error_type: str | None, error: str | None, status_code: int | None = None):
+        self.error_type = error_type or "ExportFailed"
+        self.error = error or "export failed (geometry service returned no error detail)"
+        self.status_code = status_code
+        super().__init__(f"{self.error_type}: {self.error}")
 
 
 # Gemma 4's own native structured-output convention uses control tokens
@@ -294,15 +321,34 @@ class Orchestrator:
                f"error={result.get('error')}")
         return result
 
-    async def export(self, ir: dict, fmt: str) -> tuple[bytes, str, dict] | None:
-        """Returns (file_bytes, content_type, stats) or None on failure."""
+    async def export(self, ir: dict, fmt: str) -> tuple[bytes, str, dict]:
+        """Returns (file_bytes, content_type, stats) on success.
+
+        On a non-200 from the geometry service, raises ExportFailed
+        carrying the real error_type/error (a BoundsError/CompileError --
+        the stored IR no longer validates -- or a genuine ExportError from
+        build123d's export_step/export_stl/export_gltf itself) instead of
+        silently returning None. Callers MUST catch ExportFailed and
+        surface .error_type/.error; see module docstring's NOTE on
+        export() error handling for why this changed from return-None."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self.geometry_url}/v1/export", json={"json_ir": ir, "format": fmt},
                 timeout=self.http_timeout,
             )
         if resp.status_code != 200:
-            _debug(f"[orchestrator] export FAILED -- status={resp.status_code}")
-            return None
+            detail: dict = {}
+            try:
+                body = resp.json()
+                d = body.get("detail")
+                if isinstance(d, dict):
+                    detail = d
+                elif isinstance(d, str):
+                    detail = {"error": d}
+            except Exception:  # noqa: BLE001 -- response body wasn't JSON at all
+                pass
+            _debug(f"[orchestrator] export FAILED -- status={resp.status_code} detail={detail}")
+            raise ExportFailed(detail.get("error_type"), detail.get("error"), status_code=resp.status_code)
+
         stats = json.loads(resp.headers.get("X-Geometry-Stats", "{}"))
         return resp.content, resp.headers.get("content-type", "application/octet-stream"), stats

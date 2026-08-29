@@ -11,6 +11,16 @@ NOTE: not executed in the sandbox this was authored in -- no fastapi/
 httpx installed there, no network to reach real llama.cpp/geometry
 services. Syntax/AST-checked only; test against the real stack (see
 README.md) before trusting this in production.
+
+NOTE on export error propagation: orchestrator.export() used to return
+None on any failure, so every caller here (project_render, _export_field,
+the /v1/generate export branch, the /v1/generate/stream "exported" event)
+collapsed a BoundsError, a CompileError (stored IR no longer validates),
+and a genuine build123d ExportError into the same opaque "export failed"
+422 -- no way to tell which without going around this service and hitting
+the geometry service directly. orchestrator.export() now raises
+ExportFailed carrying the geometry service's real error_type/error; every
+call site below catches it and threads that detail through instead.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from orchestrator import Orchestrator
+from orchestrator import Orchestrator, ExportFailed
 from store import ProjectStore, ProjectNotFound
 
 app = FastAPI(title="LLM Service (CAD generation orchestrator)", version="1.0")
@@ -141,11 +151,17 @@ async def generate(req: GenerateRequest):
         "conversation": result.conversation,
     }
     if result.success and req.export_format:
-        exported = await orchestrator.export(result.json_ir, req.export_format)
-        if exported:
-            data, content_type, stats = exported
+        try:
+            data, content_type, _stats = await orchestrator.export(result.json_ir, req.export_format)
             response["file_b64"] = base64.b64encode(data).decode("ascii")
             response["content_type"] = content_type
+        except ExportFailed as e:
+            # Generation itself succeeded -- only the optional export
+            # failed. Don't fail the whole response over that; surface it
+            # as its own field so the caller knows the part is valid but
+            # couldn't be exported, and why.
+            response["export_error_type"] = e.error_type
+            response["export_error"] = e.error
     return response
 
 
@@ -169,13 +185,20 @@ async def generate_stream(req: GenerateRequest):
             if event["event"] in ("success", "failure"):
                 final_event = event
             if event["event"] == "success" and req.export_format:
-                exported = await orchestrator.export(event["json_ir"], req.export_format)
-                if exported:
-                    data, content_type, _stats = exported
+                try:
+                    data, content_type, _stats = await orchestrator.export(
+                        event["json_ir"], req.export_format
+                    )
                     yield json.dumps({
                         "event": "exported",
                         "content_type": content_type,
                         "file_b64": base64.b64encode(data).decode("ascii"),
+                    }) + "\n"
+                except ExportFailed as e:
+                    yield json.dumps({
+                        "event": "export_failed",
+                        "error_type": e.error_type,
+                        "error": e.error,
                     }) + "\n"
         if final_event is not None:
             STORE.log_event(
@@ -208,17 +231,28 @@ class ProjectGenerateRequest(BaseModel):
 
 def _export_field(export_format: str | None):
     """Decorator-free helper: attach a base64 export to a response dict
-    if requested and available, used by both project_generate and the
-    undo/redo endpoints so the frontend always has something to render
-    immediately after any of these three actions."""
+    if requested and available, used by generate/undo/redo/apply so the
+    frontend always has something to render immediately after any of
+    these actions.
+
+    On ExportFailed, does NOT raise -- the mutating action itself (the
+    new version, the undo/redo pointer move, the applied edit) already
+    succeeded and is already persisted; failing the whole request over a
+    failed render/export would be misleading. Instead attaches
+    export_error_type/export_error so the frontend can show "saved, but
+    couldn't render a preview: <reason>" rather than a silent missing
+    viewport with no explanation, or a rejected request that actually
+    went through server-side."""
     async def attach(response: dict, ir: dict):
         if not export_format:
             return response
-        exported = await orchestrator.export(ir, export_format)
-        if exported:
-            data, content_type, _stats = exported
+        try:
+            data, content_type, _stats = await orchestrator.export(ir, export_format)
             response["file_b64"] = base64.b64encode(data).decode("ascii")
             response["content_type"] = content_type
+        except ExportFailed as e:
+            response["export_error_type"] = e.error_type
+            response["export_error"] = e.error
         return response
     return attach
 
@@ -394,15 +428,23 @@ async def project_redo(project_id: str, export_format: Literal["step", "stl", "g
 async def project_render(project_id: str, format: Literal["step", "stl", "glb"] = "glb",
                            user: dict = Depends(get_current_user)):
     """Raw binary export of the project's CURRENT version, for restoring
-    the viewport on page load."""
+    the viewport on page load. Unlike _export_field()'s callers above,
+    export here IS the entire point of the request -- there's no other
+    mutating action that already succeeded -- so an ExportFailed DOES
+    become the request's own 422, but now with the geometry service's
+    real error_type/error instead of the generic "export failed" this
+    used to collapse to."""
     project = _require_owned_project(project_id, user)
     if project["current"] is None:
         raise HTTPException(status_code=409, detail="project has no versions yet")
 
-    exported = await orchestrator.export(project["current"]["json_ir"], format)
-    if exported is None:
-        raise HTTPException(status_code=422, detail="export failed")
-    data, content_type, stats = exported
+    try:
+        data, content_type, stats = await orchestrator.export(project["current"]["json_ir"], format)
+    except ExportFailed as e:
+        raise HTTPException(status_code=422, detail={
+            "error_type": e.error_type,
+            "error": e.error,
+        })
     return Response(content=data, media_type=content_type,
                      headers={"X-Geometry-Stats": json.dumps(stats),
                               "Content-Disposition": f'attachment; filename="part.{format}"'})
