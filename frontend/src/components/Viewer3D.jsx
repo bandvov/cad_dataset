@@ -95,6 +95,10 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
     grid.position.y = 0;
     scene.add(grid);
 
+    // XYZ axis gizmo -- THREE.AxesHelper's built-in color convention
+    // (X=red, Y=green, Z=blue) matches every other CAD/3D tool.
+    scene.add(new THREE.AxesHelper(100));
+
     let frameId;
     const animate = () => {
       frameId = requestAnimationFrame(animate);
