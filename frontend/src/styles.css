@@ -185,6 +185,42 @@ button {
   white-space: nowrap;
 }
 
+/* Container for the row's action buttons (rename + delete) -- replaces
+   the old bare .project-dropdown-delete-only layout so a second button
+   has somewhere consistent to sit. */
+.project-dropdown-item-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.project-dropdown-rename {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.project-dropdown-rename:hover {
+  color: var(--accent);
+}
+
+/* Inline rename input -- takes over the .project-dropdown-name slot
+   while a row is being edited. Sized to blend into the row rather than
+   looking like a separate form. */
+.project-dropdown-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--accent-dim);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  padding: 3px 6px;
+}
+
 .project-dropdown-delete {
   background: transparent;
   border: none;

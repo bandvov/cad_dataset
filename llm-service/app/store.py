@@ -16,6 +16,12 @@ main.py), owner_id on projects (step 6), user_id on request_log (step
 7), and the legacy-data backfill helpers used by
 migrate_legacy_owner.py (step 8). Frontend auth support (steps 10-12)
 is not implemented -- see SESSION_HANDOFF.md.
+
+CHANGE: added rename_project() -- lets a project's display name be
+updated in place (see llm-service/app/main.py's PATCH
+/v1/projects/{id}). Only touches name/updated_at; version history and
+current_version_index are untouched, same "cheap metadata edit" shape as
+every other project-level field would be if one existed.
 """
 
 from __future__ import annotations
@@ -192,6 +198,27 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("DELETE FROM projects WHERE id = ?", (project_id,))
             return cur.rowcount > 0
+
+    def rename_project(self, project_id: str, name: str) -> dict:
+        """Renames a project in place. Only touches name/updated_at --
+        current_version_index and version history are untouched, same
+        "cheap metadata update" shape as any other project field edit
+        would be if one existed. Raises ProjectNotFound if the id doesn't
+        exist (or isn't owned by the caller -- that check happens one
+        layer up, in main.py's _require_owned_project(), same as every
+        other mutating project endpoint)."""
+        now = _now()
+        with self._cursor() as cur:
+            self._get_project_row(cur, project_id)  # raises ProjectNotFound
+            cur.execute(
+                "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+                (name, now, project_id),
+            )
+            row = cur.execute(
+                "SELECT id, owner_id, name, created_at, updated_at FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+        return dict(row)
 
     def _get_project_row(self, cur, project_id: str):
         row = cur.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()

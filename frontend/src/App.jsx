@@ -15,6 +15,7 @@ import {
   getProject,
   listProjects,
   deleteProject,
+  renameProject,
   renderProject,
   downloadExport,
   logDownload,
@@ -498,6 +499,27 @@ export default function App() {
     [projectId, clearPartState],
   );
 
+  // Renames a project via the switcher dropdown's inline edit field. The
+  // project list is the only place a name lives client-side (there's no
+  // separate "current project" object) -- patching the list in place
+  // keeps currentProjectName (derived below) correct without an extra
+  // round-trip.
+  const handleRenameProject = useCallback(async (id, name) => {
+    try {
+      const updated = await renameProject(id, name);
+      setProjects((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, name: updated.name } : p)),
+      );
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        makeMessage("assistant", `Couldn't rename that part: ${err.message}`, {
+          isError: true,
+        }),
+      ]);
+    }
+  }, []);
+
   // ---- auth gate: everything above this is still just hook setup, no
   // rendering, so it's fine for these hooks to exist even while logged
   // out -- React requires hooks to run unconditionally on every render.
@@ -531,6 +553,7 @@ export default function App() {
         onSwitch={handleSwitchProject}
         onCreate={handleCreateProject}
         onDelete={handleDeleteProject}
+        onRename={handleRenameProject}
         onLogout={handleLogout}
       />
       <div className="app-layout">

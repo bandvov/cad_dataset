@@ -177,6 +177,21 @@ export async function deleteProject(projectId) {
   return handleResponse(res);
 }
 
+/**
+ * Renames a project. PATCH, not PUT -- this only updates the name field,
+ * not the whole resource. Returns the updated project row
+ * ({id, owner_id, name, created_at, updated_at}), same shape as
+ * createProject()'s response.
+ */
+export async function renameProject(projectId, name) {
+  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name }),
+  });
+  return handleResponse(res);
+}
+
 export async function getProject(projectId) {
   const res = await authFetch(`${API_BASE}/v1/projects/${projectId}`, {
     headers: authHeaders(),

@@ -21,6 +21,12 @@ and a genuine build123d ExportError into the same opaque "export failed"
 the geometry service directly. orchestrator.export() now raises
 ExportFailed carrying the geometry service's real error_type/error; every
 call site below catches it and threads that detail through instead.
+
+CHANGE: added PATCH /v1/projects/{id} to rename a project (see
+store.py's rename_project()). Same auth/ownership pattern as every other
+mutating /v1/projects/{id} route -- _require_owned_project() gives the
+404-not-403 behavior for someone else's project, and this doesn't touch
+version history or current_version_index, just the display name.
 """
 
 from __future__ import annotations
@@ -223,6 +229,10 @@ class CreateProjectRequest(BaseModel):
     name: str = "Untitled part"
 
 
+class RenameProjectRequest(BaseModel):
+    name: str
+
+
 class ProjectGenerateRequest(BaseModel):
     prompt: str
     max_attempts: int = 3
@@ -286,6 +296,21 @@ async def list_projects(user: dict = Depends(get_current_user)):
 @app.get("/v1/projects/{project_id}")
 async def get_project(project_id: str, user: dict = Depends(get_current_user)):
     return _require_owned_project(project_id, user)
+
+
+@app.patch("/v1/projects/{project_id}")
+async def rename_project(project_id: str, req: RenameProjectRequest,
+                           user: dict = Depends(get_current_user)):
+    """Renames a project. PATCH (not PUT) since this only updates the
+    `name` field, not the whole resource -- same ownership check as
+    every other mutating /v1/projects/{id} route. Rejects empty/
+    whitespace-only names with a 400 rather than silently storing one;
+    an unnamed part is confusing in the project switcher dropdown."""
+    _require_owned_project(project_id, user)
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name must not be empty")
+    return STORE.rename_project(project_id, name)
 
 
 @app.get("/v1/projects/{project_id}/versions/{version_index}")
