@@ -109,6 +109,9 @@ class IRCompiler:
     def _combine(self, new_solid, operation: str | None):
         """Fold a new solid into self.current_part per the boolean op."""
         op = operation or "ADD"
+        if op == "CUT":
+            op = "SUBTRACT"  # alias -- some model outputs / user edits use CUT
+            # instead of SUBTRACT; same semantics, one code path
         if op not in ("ADD", "SUBTRACT", "INTERSECT"):
             raise CompileError(f"invalid operation '{op}'")
         if self.current_part is None:

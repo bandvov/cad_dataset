@@ -108,8 +108,8 @@ SOLID_PRODUCING = {
 # Feature types that mutate the current solid in place (no separate operand).
 SOLID_MODIFYING = {"Fillet", "Chamfer", "Shell", "Hole"}
 
-BOOLEAN_OPS = {"ADD", "SUBTRACT", "INTERSECT"}
-SKETCH_MODES = {"ADD", "SUBTRACT", "INTERSECT"}
+BOOLEAN_OPS = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
+SKETCH_MODES = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
 SELECTOR_AXES = {"X", "Y", "Z"}
 SELECTOR_CRITERIA = {"max", "min", "all"}
 
