@@ -54,11 +54,30 @@ ExportFailed carrying that detail through instead of discarding it --
 callers must catch ExportFailed and surface .error_type/.error rather
 than assuming a bare None means "something went wrong, no further info."
 
+NOTE on extract_json()'s return shape (CHANGED): this used to return just
+`dict | None`, collapsing every parse failure -- markdown fences, stray
+prose, a genuine syntax error like an extra brace -- into the same
+generic "model output was not valid JSON" message fed back as the repair
+turn. That's enough for the model to know *that* it failed, but not
+*where*, which meant a genuine JSON syntax slip (e.g. one extra `}`
+before the closing `]` of "features") got the same non-actionable retry
+prompt as everything else, three times in a row, with no signal to
+correct against -- unlike the compile-error repair path, which always
+hands back a precise error_type/error from the real interpreter.
+extract_json() now returns (ir, error_detail): on success error_detail is
+None; on failure it's the most specific json.JSONDecodeError message
+available (has .msg/.lineno/.colno/.pos -- e.g. "Extra data: line 1
+column 694 (char 693)"), taken from whichever parse attempt got furthest
+before giving up. This is a signature change -- every call site needs the
+tuple-unpack, not just the one in generate_stream() below.
+
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
 service. `extract_json()` (the one dependency-free piece) was smoke-
-tested standalone; the async HTTP flow was not. Test against a real
-llama.cpp + geometry service stack before trusting this in production.
+tested standalone, including against the exact "extra closing brace
+before the features-array bracket" case that motivated the return-shape
+change above; the async HTTP flow was not. Test against a real llama.cpp
++ geometry service stack before trusting this in production.
 """
 
 from __future__ import annotations
@@ -126,31 +145,42 @@ def _strip_gemma4_leaks(text: str) -> str:
     return cleaned
 
 
-def extract_json(text: str) -> dict | None:
+def extract_json(text: str) -> tuple[dict | None, str | None]:
     """The model was trained to emit raw JSON with nothing else, but
     sampling can still occasionally wrap it in markdown fences or add
-    stray text -- try increasingly permissive extraction before giving up."""
+    stray text -- try increasingly permissive extraction before giving up.
+
+    Returns (ir, error_detail):
+      - success: (dict, None)
+      - failure: (None, message) where `message` is the most specific
+        json.JSONDecodeError text available (see module docstring's NOTE
+        on this return shape for why generic-vs-specific matters here --
+        this is what gets fed back into the repair turn, and a model
+        can't correct a syntax error it was never told the position of).
+    """
     text = _strip_gemma4_leaks(text.strip())
+    last_err: str | None = None
+
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+        return json.loads(text), None
+    except json.JSONDecodeError as e:
+        last_err = str(e)
 
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if fenced:
         try:
-            return json.loads(fenced.group(1))
-        except json.JSONDecodeError:
-            pass
+            return json.loads(fenced.group(1)), None
+        except json.JSONDecodeError as e:
+            last_err = str(e)
 
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end != -1 and end > start:
         try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            pass
+            return json.loads(text[start:end + 1]), None
+        except json.JSONDecodeError as e:
+            last_err = str(e)
 
-    return None
+    return None, last_err
 
 
 @dataclass
@@ -239,9 +269,16 @@ class Orchestrator:
                 conversation.append({"role": "assistant", "content": raw})
                 yield {"event": "llm_response", "attempt": attempt, "content": raw}
 
-                ir = extract_json(raw)
+                ir, parse_err = extract_json(raw)
                 if ir is None:
-                    last_error = "model output was not valid JSON"
+                    # parse_err carries the real json.JSONDecodeError text
+                    # (position included) when available -- e.g. a stray
+                    # extra '}' before the features-array bracket -- so the
+                    # repair turn below can point at *where* it broke, not
+                    # just *that* it broke. Falls back to the old generic
+                    # message only if every parse attempt in extract_json()
+                    # somehow produced no error text at all.
+                    last_error = parse_err or "model output was not valid JSON"
                     _debug(f"[orchestrator] JSON parse FAILED: {last_error}")
                     yield {"event": "attempt_failed", "attempt": attempt,
                            "error_type": "ParseError", "error": last_error}
