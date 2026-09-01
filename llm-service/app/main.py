@@ -27,6 +27,16 @@ store.py's rename_project()). Same auth/ownership pattern as every other
 mutating /v1/projects/{id} route -- _require_owned_project() gives the
 404-not-403 behavior for someone else's project, and this doesn't touch
 version history or current_version_index, just the display name.
+
+CHANGE (auth step 13): added per-user_id rate limiting via
+rate_limit_middleware() below, closing out the last item in the 14-step
+auth plan. Reuses STORE.verify_session() -- the same session lookup
+get_current_user() already does -- rather than introducing a second way
+to identify a caller. Deliberately implemented as ASGI middleware, not a
+route dependency, so it's enforced uniformly across every current and
+future route without each one remembering to add it. See
+rate_limiter.py's docstring for the fixed-window design and its
+single-instance-only scope.
 """
 
 from __future__ import annotations
@@ -35,14 +45,15 @@ import json
 import os
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from orchestrator import Orchestrator, ExportFailed
 from store import ProjectStore, ProjectNotFound
+from rate_limiter import RateLimiter
 
 app = FastAPI(title="LLM Service (CAD generation orchestrator)", version="1.0")
 
@@ -70,6 +81,51 @@ STORE = ProjectStore(
     os.environ.get("DB_PATH", "/data/cad_sessions.db"),
     session_lifetime_hours=_env_float("SESSION_LIFETIME_HOURS"),
 )
+
+# Auth step 13. int(): RATE_LIMIT_PER_MINUTE has shipped as a config knob
+# with a "60" default since step 9 -- see .env.example -- so an unset env
+# var still resolves to a sane limit rather than silently disabling this.
+# <= 0 is the documented off-switch (see RateLimiter's docstring).
+RATE_LIMITER = RateLimiter(limit_per_minute=int(os.environ.get("RATE_LIMIT_PER_MINUTE", "60")))
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Auth step 13: per-user_id request budget, enforced ahead of every
+    route (including ones added after this comment is written -- that's
+    the point of doing this as middleware rather than a route
+    dependency). Keyed on the same Authorization: Bearer <token> every
+    authenticated route already requires, verified via
+    STORE.verify_session() -- the identical lookup get_current_user()
+    performs, not a second parallel way to identify a caller.
+
+    Deliberately does NOT gate requests with no valid session token:
+    signup/login/health, and the stateless /v1/generate path (which has
+    never had a user concept -- see get_current_user's docstring in the
+    routes below) all pass through untouched, exactly as exposed as they
+    were before this change. There's no user_id to key a per-user budget
+    on for any of those; rate-limiting them would need a different key
+    (e.g. IP) and a different policy, out of scope for this step.
+
+    A 429 here carries a Retry-After header (seconds until the current
+    fixed window rolls over) so a well-behaved client can back off
+    correctly instead of hammering immediately again.
+    """
+    if RATE_LIMITER.limit_per_minute > 0:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+            user_id = STORE.verify_session(token)
+            if user_id is not None:
+                allowed, retry_after = RATE_LIMITER.check(user_id)
+                if not allowed:
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": f"rate limit exceeded "
+                                            f"({RATE_LIMITER.limit_per_minute} requests/minute)"},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+    return await call_next(request)
 
 
 class GenerateRequest(BaseModel):
