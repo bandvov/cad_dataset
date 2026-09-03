@@ -22,6 +22,19 @@ updated in place (see llm-service/app/main.py's PATCH
 /v1/projects/{id}). Only touches name/updated_at; version history and
 current_version_index are untouched, same "cheap metadata edit" shape as
 every other project-level field would be if one existed.
+
+CHANGE (admin roles, step 1 of the flywheel-auth fix): added an
+`is_admin` column on `users` and a `set_admin()` helper. This is schema
++ data-layer only -- nothing in main.py enforces or reads this yet (that's
+the next step: a `get_current_admin_user` dependency and admin-scoped log
+routes). The motivating gap: `/v1/logs*` is correctly scoped to
+`user_id` (step 7), which means even a well-formed request from an
+ordinary user's token could never see cross-user data -- the flywheel
+miners need to see everyone's production events, which requires a
+distinct privileged-caller concept, not just "any authenticated caller."
+`is_admin` is that concept. Defaults to 0/False for every existing and
+newly created user -- nobody is an admin until `set_admin()` (or its
+future CLI wrapper) is run explicitly.
 """
 
 from __future__ import annotations
@@ -56,6 +69,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -121,6 +135,10 @@ class ProjectNotFound(KeyError):
     pass
 
 
+class UserNotFound(KeyError):
+    pass
+
+
 class ProjectStore:
     def __init__(self, db_path: str, session_lifetime_hours: float | None = None):
         """session_lifetime_hours: auth step 9 config knob. None (default)
@@ -144,6 +162,7 @@ class ProjectStore:
         for stmt in (
             "ALTER TABLE projects ADD COLUMN owner_id TEXT",
             "ALTER TABLE request_log ADD COLUMN user_id TEXT",
+            "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 self._conn.execute(stmt)
@@ -266,36 +285,66 @@ class ProjectStore:
         try:
             with self._cursor() as cur:
                 cur.execute(
-                    "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES (?, ?, ?, 0, ?)",
                     (uid, email, hash_password(password), now),
                 )
         except sqlite3.IntegrityError:
             raise ValueError(f"email '{email}' already registered")
-        return {"id": uid, "email": email, "created_at": now}
+        return {"id": uid, "email": email, "is_admin": False, "created_at": now}
 
     def authenticate(self, email: str, password: str) -> dict | None:
         with self._cursor() as cur:
             row = cur.execute(
-                "SELECT id, email, password_hash, created_at FROM users WHERE email = ?",
+                "SELECT id, email, password_hash, is_admin, created_at FROM users WHERE email = ?",
                 (email,),
             ).fetchone()
         if row is None or not verify_password(password, row["password_hash"]):
             return None
-        return {"id": row["id"], "email": row["email"], "created_at": row["created_at"]}
+        return {"id": row["id"], "email": row["email"], "is_admin": bool(row["is_admin"]),
+                "created_at": row["created_at"]}
 
     def get_user(self, user_id: str) -> dict | None:
         with self._cursor() as cur:
             row = cur.execute(
-                "SELECT id, email, created_at FROM users WHERE id = ?", (user_id,)
+                "SELECT id, email, is_admin, created_at FROM users WHERE id = ?", (user_id,)
             ).fetchone()
-        return dict(row) if row else None
+        return self._row_to_user(row)
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._cursor() as cur:
             row = cur.execute(
-                "SELECT id, email, created_at FROM users WHERE email = ?", (email,)
+                "SELECT id, email, is_admin, created_at FROM users WHERE email = ?", (email,)
             ).fetchone()
-        return dict(row) if row else None
+        return self._row_to_user(row)
+
+    @staticmethod
+    def _row_to_user(row) -> dict | None:
+        if row is None:
+            return None
+        return {"id": row["id"], "email": row["email"], "is_admin": bool(row["is_admin"]),
+                "created_at": row["created_at"]}
+
+    def set_admin(self, user_id: str, is_admin: bool) -> dict:
+        """Grants or revokes admin status for a user. Data-layer only --
+        no HTTP route calls this yet (that's the next step: a small CLI,
+        same "dry-run-free but explicit and operator-driven" shape as
+        migrate_legacy_owner.py, or a route gated behind an existing
+        admin -- TBD). Raises UserNotFound if the id doesn't exist, same
+        style as ProjectNotFound elsewhere in this file, so callers can't
+        silently grant admin to a typo'd user id and get back an empty
+        success."""
+        with self._cursor() as cur:
+            row = cur.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row is None:
+                raise UserNotFound(user_id)
+            cur.execute(
+                "UPDATE users SET is_admin = ? WHERE id = ?",
+                (1 if is_admin else 0, user_id),
+            )
+            updated = cur.execute(
+                "SELECT id, email, is_admin, created_at FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return self._row_to_user(updated)
 
     # ------------------------------------------------------------------ #
     # sessions (opaque, revocable tokens -- not JWT)
