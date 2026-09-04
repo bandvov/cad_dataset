@@ -37,6 +37,17 @@ route dependency, so it's enforced uniformly across every current and
 future route without each one remembering to add it. See
 rate_limiter.py's docstring for the fixed-window design and its
 single-instance-only scope.
+
+CHANGE (flywheel-auth fix, step 2 of 3): added get_current_admin_user(),
+a thin wrapper around get_current_user() that additionally requires
+user["is_admin"] (see store.py's is_admin column, added in step 1). No
+route uses this yet -- that's step 3 (admin-scoped log routes for the
+flywheel miners, since /v1/logs* is correctly scoped to a single user_id
+per auth step 7 and a normal user's token structurally can't see
+cross-user data no matter what header it sends). This step only adds the
+dependency itself so it exists ahead of the routes that will use it, same
+staging approach step 9's RATE_LIMIT_PER_MINUTE knob took before step
+13's middleware landed.
 """
 
 from __future__ import annotations
@@ -176,6 +187,24 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(_securi
     user = STORE.get_user(user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+    return user
+
+
+async def get_current_admin_user(user: dict = Depends(get_current_user)) -> dict:
+    """Same token verification as get_current_user, plus an is_admin
+    check. 403, not 404 -- unlike _require_owned_project()'s deliberate
+    404-on-mismatch (which exists to avoid leaking whether a specific
+    resource exists to a non-owner), there's no resource-existence
+    question on an admin-only route: it's admin-only regardless of what's
+    behind it, so a caller who IS authenticated but lacks the privilege
+    gets a plain, honest 403 rather than a misleading 404.
+
+    Layered as its own dependency (not folded into get_current_user
+    itself) so every existing route's behavior is completely unchanged --
+    this only affects routes that explicitly opt in by depending on this
+    function instead of get_current_user."""
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="admin access required")
     return user
 
 
@@ -567,3 +596,31 @@ async def get_log_outcomes(project_id: str | None = None, limit: int = 500,
 @app.get("/v1/logs/summary")
 async def get_log_summary(user: dict = Depends(get_current_user)):
     return STORE.log_summary(user_id=user["id"])
+
+
+# ---------------------------------------------------------------------- #
+# Admin log routes (flywheel-auth fix, step 3 of 3): unscoped versions of
+# the routes above, for the flywheel miners. Deliberately separate
+# routes, not a "?all=true" flag on /v1/logs* -- keeps the cross-user
+# bypass out of the normal user-facing routes entirely rather than
+# threading a conditional through them. store.py's list_events/
+# compute_outcomes/log_summary already accept user_id=None meaning "no
+# scoping" (that's the pre-auth-step-7 default they've always had); these
+# routes are just the first callers that pass it deliberately.
+# ---------------------------------------------------------------------- #
+
+@app.get("/v1/admin/logs")
+async def admin_get_logs(project_id: str | None = None, limit: int = 200,
+                          admin: dict = Depends(get_current_admin_user)):
+    return STORE.list_events(project_id=project_id, user_id=None, limit=limit)
+
+
+@app.get("/v1/admin/logs/outcomes")
+async def admin_get_log_outcomes(project_id: str | None = None, limit: int = 500,
+                                  admin: dict = Depends(get_current_admin_user)):
+    return STORE.compute_outcomes(project_id=project_id, user_id=None, limit=limit)
+
+
+@app.get("/v1/admin/logs/summary")
+async def admin_get_log_summary(admin: dict = Depends(get_current_admin_user)):
+    return STORE.log_summary(user_id=None)

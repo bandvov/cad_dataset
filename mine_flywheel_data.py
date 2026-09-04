@@ -1,10 +1,20 @@
 """
 mine_flywheel_data.py
 Phase 4 step 1: log extraction. Pulls outcome-classified events from
-llm-service's GET /v1/logs/outcomes (see llm-service/app/store.py's
+llm-service's GET /v1/admin/logs/outcomes (see llm-service/app/store.py's
 compute_outcomes() for exactly what each outcome label means and doesn't
 mean), filters by outcome type and date range, and writes the matching
 raw events to a JSONL file.
+
+CHANGE (flywheel-auth fix, step 5): this used to hit GET /v1/logs/outcomes
+with no Authorization header at all. That route is user_id-scoped (auth
+step 7) -- even sending a token would only ever return one user's events,
+never useful for mining production data across everyone. Now points at
+GET /v1/admin/logs/outcomes (added alongside get_current_admin_user in
+the flywheel-auth fix's steps 2-3) and requires --auth-token, the session
+token of a user with is_admin=True (grant one via make_admin.py). A
+non-admin or missing token now fails loudly (401/403) instead of the
+previous silent-empty-or-wrong-scope behavior.
 
 This is EXTRACTION ONLY -- turning these events into verified training
 pairs (matching a failed_ir to its eventual fix, re-running through
@@ -15,6 +25,7 @@ script's output is those steps' input.
 Usage:
     python mine_flywheel_data.py \
         --llm-service-url http://localhost:8001 \
+        --auth-token <admin session token> \
         --outcomes retried edited abandoned \
         --since 2026-08-01 --until 2026-08-08 \
         --out out/flywheel_events.jsonl
@@ -73,15 +84,31 @@ def _matches_outcome(event: dict, wanted: set[str]) -> bool:
     return False
 
 
-def fetch_outcomes(llm_service_url: str, project_id: str | None, limit: int) -> list[dict]:
+def fetch_outcomes(llm_service_url: str, project_id: str | None, limit: int,
+                    auth_token: str | None = None) -> list[dict]:
+    """Hits the ADMIN log route (cross-user) -- see module docstring's
+    CHANGE note. auth_token must be an admin user's session token; a
+    missing/non-admin token raises (via urllib.error.HTTPError, 401/403)
+    rather than silently returning an empty or wrongly-scoped result."""
     params = {"limit": str(limit)}
     if project_id:
         params["project_id"] = project_id
-    url = f"{llm_service_url.rstrip('/')}/v1/logs/outcomes?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    url = f"{llm_service_url.rstrip('/')}/v1/admin/logs/outcomes?{urllib.parse.urlencode(params)}"
+    headers = {"Accept": "application/json"}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError(
+                f"{e.code} from {url} -- --auth-token must be an admin user's session "
+                f"token (grant one via make_admin.py); a normal user's token cannot "
+                f"see cross-user log data"
+            ) from e
+        raise
     except urllib.error.URLError as e:
         raise RuntimeError(f"could not reach llm-service at {url}: {e}") from e
 
@@ -105,6 +132,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llm-service-url", default=os.environ.get("LLM_SERVICE_URL", "http://localhost:8001"))
+    ap.add_argument("--auth-token", default=os.environ.get("LLM_SERVICE_ADMIN_TOKEN"),
+                     required=os.environ.get("LLM_SERVICE_ADMIN_TOKEN") is None,
+                     help="session token of a user with is_admin=True (see make_admin.py). "
+                          "Required -- GET /v1/admin/logs/outcomes has no unauthenticated path. "
+                          "Can also be set via LLM_SERVICE_ADMIN_TOKEN.")
     ap.add_argument("--project-id", default=None,
                      help="restrict to one project; default mines across all projects")
     ap.add_argument("--fetch-limit", type=int, default=5000,
@@ -128,7 +160,7 @@ def main():
     until = _parse_dt(args.until) if args.until else None
 
     print(f"fetching outcomes from {args.llm_service_url} (limit={args.fetch_limit})...")
-    events = fetch_outcomes(args.llm_service_url, args.project_id, args.fetch_limit)
+    events = fetch_outcomes(args.llm_service_url, args.project_id, args.fetch_limit, args.auth_token)
     print(f"  {len(events)} generate/apply events returned")
 
     filtered = filter_events(events, set(args.outcomes), since, until)

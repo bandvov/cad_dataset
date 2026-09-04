@@ -7,12 +7,20 @@ generate/apply -- "the eventual fix" -- and pairs them into a record
 shaped like gen_repair.py's synthetic output (source="flywheel",
 verified=False -- re-verification is step 4, NOT done here).
 
+CHANGE (flywheel-auth fix, step 5): now requires --auth-token (an admin
+user's session token, see make_admin.py), threaded into both
+fetch_outcomes() (mine_flywheel_data.py's, now hitting the admin-scoped
+GET /v1/admin/logs/outcomes) and fetch_version() (flywheel_common.py's,
+still owner-scoped -- see that module's docstring for the coverage
+caveat: an admin token only resolves fix versions for projects it owns).
+
 Needs the FULL, unfiltered outcome log (not step 1's default filtered
 output) to find fixes -- fetches it directly unless --events-file points
 at a file that already contains every outcome category.
 
 Usage:
     python mine_flywheel_repairs.py --llm-service-url http://localhost:8001 \
+        --auth-token <admin session token> \
         --out out/flywheel_repairs.jsonl --unfixed-out out/flywheel_unfixed.jsonl
 """
 
@@ -82,6 +90,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llm-service-url", default=os.environ.get("LLM_SERVICE_URL", "http://localhost:8001"))
+    ap.add_argument("--auth-token", default=os.environ.get("LLM_SERVICE_ADMIN_TOKEN"),
+                     required=os.environ.get("LLM_SERVICE_ADMIN_TOKEN") is None,
+                     help="session token of a user with is_admin=True (see make_admin.py). "
+                          "Required unless --events-file is given (no network call in that "
+                          "case for the outcomes fetch, but fetch_version still needs it).")
     ap.add_argument("--events-file", default=None,
                      help="JSONL with ALL outcome categories (not step 1's filtered default) -- "
                           "if omitted, fetches the full unfiltered log directly instead")
@@ -95,7 +108,7 @@ def main():
         with open(args.events_file) as f:
             events = [json.loads(l) for l in f]
     else:
-        events = fetch_outcomes(args.llm_service_url, args.project_id, args.fetch_limit)
+        events = fetch_outcomes(args.llm_service_url, args.project_id, args.fetch_limit, args.auth_token)
     print(f"{len(events)} events loaded")
 
     pairs, unfixed = build_repair_pairs(events)
@@ -104,13 +117,15 @@ def main():
     records, skipped = [], 0
     for pair in pairs:
         try:
-            version = fetch_version(args.llm_service_url, pair["project_id"], pair["fix"]["version_index"])
+            version = fetch_version(args.llm_service_url, pair["project_id"],
+                                     pair["fix"]["version_index"], args.auth_token)
         except Exception:
             skipped += 1
             continue
         records.append(make_repair_record(pair, version["json_ir"]))
     if skipped:
-        print(f"  ({skipped} pairs skipped -- couldn't fetch the fix version)")
+        print(f"  ({skipped} pairs skipped -- couldn't fetch the fix version, e.g. owned by "
+              f"another user; an admin token doesn't bypass project ownership on that route)")
 
     for path, rows in ((args.out, records), (args.unfixed_out, unfixed)):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
