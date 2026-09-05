@@ -895,3 +895,12 @@ button {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.viewcube-wrap {
+  position: absolute;
+  bottom: 14px;
+  right: 16px;
+  background: rgba(27, 30, 36, 0.55);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(2px);
+}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import ViewCube from "./ViewCube";
 
 function base64ToArrayBuffer(base64) {
   const binary = atob(base64);
@@ -202,6 +203,9 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
       </div>
 
       {hasPart && !isLoading && <ExportBar onDownload={onDownload} />}
+      <div className="viewcube-wrap">
+        <ViewCube mainCameraRef={cameraRef} mainControlsRef={controlsRef} />
+      </div>
 
       {!hasPart && !isLoading && (
         <div className="viewer-empty">
