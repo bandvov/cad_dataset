@@ -220,18 +220,21 @@ async def health():
 
 
 @app.post("/v1/generate")
-async def generate(req: GenerateRequest):
-    """The main product-facing endpoint. Deliberately NOT behind auth
-    (see SESSION_HANDOFF.md) -- its log_event() call below gets
-    user_id=None, same bucket as legacy/pre-migration rows. success=false
-    with a populated `error` means the model couldn't produce valid
-    geometry within max_attempts -- surface that to the user rather than
-    the raw IR; `conversation` is included for debugging/observability."""
+async def generate(req: GenerateRequest, user: dict = Depends(get_current_user)):
+    """The main product-facing endpoint. Now requires auth (previously
+    anonymous -- see git history / SESSION_HANDOFF.md for why: this was
+    the one mutating LLM/geometry-compute path with no rate limiting and
+    no attribution, since rate_limit_middleware() only budgets requests
+    that already carry a valid session token). success=false with a
+    populated `error` means the model couldn't produce valid geometry
+    within max_attempts -- surface that to the user rather than the raw
+    IR; `conversation` is included for debugging/observability."""
     result = await orchestrator.generate(req.prompt, req.base_ir, req.max_attempts)
     STORE.log_event(
         project_id=None, action="generate", prompt=req.prompt,
         success=result.success, error=result.error, attempts=result.attempts,
         failed_ir=None if result.success else result.json_ir,
+        user_id=user["id"],
     )
     response = {
         "success": result.success,
@@ -247,27 +250,23 @@ async def generate(req: GenerateRequest):
             response["file_b64"] = base64.b64encode(data).decode("ascii")
             response["content_type"] = content_type
         except ExportFailed as e:
-            # Generation itself succeeded -- only the optional export
-            # failed. Don't fail the whole response over that; surface it
-            # as its own field so the caller knows the part is valid but
-            # couldn't be exported, and why.
             response["export_error_type"] = e.error_type
             response["export_error"] = e.error
     return response
 
 
 @app.post("/v1/generate/stream")
-async def generate_stream(req: GenerateRequest):
-    """Same loop as /v1/generate, streamed as newline-delimited JSON
-    (NDJSON) -- one `{"event": ...}\\n` object per line, flushed as each
-    step happens, so a client can show live progress ("attempt 1/3",
-    "repairing...") instead of waiting silently for the whole loop.
+async def generate_stream(req: GenerateRequest, user: dict = Depends(get_current_user)):
+    """Same loop as /v1/generate, streamed as NDJSON. Same auth
+    requirement as /v1/generate above -- FastAPI resolves dependencies
+    before the StreamingResponse generator starts, so this doesn't
+    complicate the streaming itself.
 
     curl example:
       curl -N -X POST localhost:8001/v1/generate/stream \\
+        -H "Authorization: Bearer <token>" \\
         -H "Content-Type: application/json" \\
         -d '{"prompt": "A 40x30mm plate, 10mm thick."}'
-    (-N disables curl's output buffering so lines print as they arrive)
     """
     async def event_lines():
         final_event = None
@@ -296,7 +295,9 @@ async def generate_stream(req: GenerateRequest):
                 project_id=None, action="generate", prompt=req.prompt,
                 success=(final_event["event"] == "success"),
                 error=final_event.get("error"), attempts=final_event.get("attempts"),
-                failed_ir=None if final_event["event"] == "success" else final_event.get("json_ir"),
+                failed_ir=None if final_event["event"] == "success" else final_event.get(
+                    "json_ir"),
+                user_id=user["id"],
             )
 
     return StreamingResponse(event_lines(), media_type="application/x-ndjson")
