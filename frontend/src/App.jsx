@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Routes, Route, Navigate, useNavigate, useParams } from "react-router-dom";
 import ProjectBar from "./components/ProjectBar";
 import ChatPanel from "./components/ChatPanel";
 import FeatureTreePanel from "./components/FeatureTreePanel";
@@ -26,19 +27,15 @@ import {
 } from "./api";
 import "./styles.css";
 
-// Plain browser localStorage -- this is a real standalone web app (built
-// to files, served by nginx), not a Claude Artifact rendered inline in
-// chat, so the artifact sandbox's "no localStorage" restriction doesn't
-// apply here.
+// The URL (/projects/:projectId) is now the source of truth for "which
+// project is open" -- see ProjectWorkspace below. This key is downgraded
+// to a "last opened project" hint only, used to redirect a bare
+// "/projects" (or "/") visit somewhere useful; nothing reads it
+// authoritatively anymore.
 const PROJECT_KEY = "cad_project_id";
 // Step 11: persists { token, user } as one JSON blob so a page reload can
-// restore both without an extra round-trip (there's no "get current user
-// by token" endpoint, only verify-via-first-authenticated-call). The
-// token is an opaque, server-revocable session token (not a JWT), so
-// storing it in localStorage is the same trust model as any other
-// session-cookie-less SPA -- it's only as sensitive as the session it
-// represents, and logout (POST /v1/auth/logout) invalidates it
-// server-side, not just locally.
+// restore both without an extra round-trip. Opaque, server-revocable
+// session token -- see frontend/README.md's history for the trust model.
 const AUTH_KEY = "cad_auth";
 
 let nextMessageId = 1;
@@ -52,22 +49,14 @@ const GREETING = makeMessage(
 );
 
 export default function App() {
+  const navigate = useNavigate();
+
   // ---- auth (steps 10-12) ----
-  // Token persists across reloads (localStorage, see AUTH_KEY) and is
-  // attached as an Authorization header on every authenticated api.js
-  // call. A 401 from any of those calls (expired/revoked token) is caught
-  // in ONE place -- api.js's authFetch() -- which invokes the handler
-  // registered below, rather than every catch block in this file having
-  // to recognize "was that a 401?" for itself.
   const [authToken, setAuthTokenState] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
-  const [authView, setAuthView] = useState("login"); // "login" | "signup"
   const [authRestored, setAuthRestored] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
 
-  // Keeps React state, api.js's in-memory token (used to build the
-  // Authorization header), and localStorage in sync in one place, so no
-  // call site can update one and forget the others.
   const applyAuth = useCallback((token, user) => {
     setAuthTokenState(token);
     setCurrentUser(user);
@@ -79,8 +68,6 @@ export default function App() {
     }
   }, []);
 
-  // Restore a persisted session on first mount, before the project-list
-  // effect below (which depends on authToken) can fire.
   useEffect(() => {
     const stored = localStorage.getItem(AUTH_KEY);
     if (stored) {
@@ -94,13 +81,22 @@ export default function App() {
     setAuthRestored(true);
   }, [applyAuth]);
 
+  // Where an authenticated caller lands: whatever project was open last
+  // time (localStorage hint), or the bare workspace if there isn't one.
+  // A pure read, not state -- cheap enough to call inline wherever needed.
+  function redirectTarget() {
+    const stored = localStorage.getItem(PROJECT_KEY);
+    return stored ? `/projects/${stored}` : "/projects";
+  }
+
   const handleLogin = useCallback(
     async (email, password) => {
       const { token, user } = await login(email, password);
       setSessionExpired(false);
       applyAuth(token, user);
+      navigate(redirectTarget(), { replace: true });
     },
-    [applyAuth],
+    [applyAuth, navigate],
   );
 
   const handleSignup = useCallback(
@@ -108,22 +104,19 @@ export default function App() {
       const { token, user } = await signup(email, password);
       setSessionExpired(false);
       applyAuth(token, user);
+      navigate("/projects", { replace: true }); // brand-new account, nothing to restore
     },
-    [applyAuth],
+    [applyAuth, navigate],
   );
 
-  // Shared by an explicit logout and a global 401: drops auth state, the
-  // persisted token, and every piece of project state tied to that
-  // session (open part, undo/redo history, chat log) together, so a
-  // stale project id can never linger for the NEXT person who logs in on
-  // this browser.
+  // Shared by an explicit logout and a global 401: drops auth state and
+  // the persisted "last project" hint together. Project-specific state
+  // (open part, undo/redo history, chat log) now lives in
+  // ProjectWorkspace and unmounts on its own once the route below stops
+  // rendering it -- nothing to clear here by hand.
   const clearSessionState = useCallback(() => {
     applyAuth(null, null);
     localStorage.removeItem(PROJECT_KEY);
-    setProjectId(null);
-    clearPartState();
-    setMessages([GREETING]);
-    setProjects([]);
   }, [applyAuth]);
 
   const handleLogout = useCallback(async () => {
@@ -134,23 +127,96 @@ export default function App() {
       // state regardless, logout should never get the user "stuck"
     }
     clearSessionState();
-  }, [clearSessionState]);
+    navigate("/login", { replace: true });
+  }, [clearSessionState, navigate]);
 
   // Global 401 handler (step 12): registered once, invoked by api.js's
   // authFetch() from inside whichever call happened to hit the expired
-  // token first. Sets sessionExpired so the login screen can explain why
-  // it's showing up again, instead of silently dropping the user there.
+  // token first.
   useEffect(() => {
     setUnauthorizedHandler(() => {
       setSessionExpired(true);
       clearSessionState();
+      navigate("/login", { replace: true });
     });
     return () => setUnauthorizedHandler(null);
-  }, [clearSessionState]);
+  }, [clearSessionState, navigate]);
+
+  // authRestored avoids a one-frame flash of the login screen while the
+  // localStorage-restore effect runs on first mount.
+  if (!authRestored) {
+    return null;
+  }
+
+  return (
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          authToken ? (
+            <Navigate to={redirectTarget()} replace />
+          ) : (
+            <LoginPage
+              onLogin={handleLogin}
+              onSwitchToSignup={() => navigate("/signup")}
+              sessionExpired={sessionExpired}
+            />
+          )
+        }
+      />
+      <Route
+        path="/signup"
+        element={
+          authToken ? (
+            <Navigate to={redirectTarget()} replace />
+          ) : (
+            <SignupPage
+              onSignup={handleSignup}
+              onSwitchToLogin={() => navigate("/login")}
+            />
+          )
+        }
+      />
+      <Route
+        path="/projects"
+        element={
+          authToken ? (
+            <ProjectWorkspace currentUser={currentUser} onLogout={handleLogout} />
+          ) : (
+            <Navigate to="/login" replace />
+          )
+        }
+      />
+      <Route
+        path="/projects/:projectId"
+        element={
+          authToken ? (
+            <ProjectWorkspace currentUser={currentUser} onLogout={handleLogout} />
+          ) : (
+            <Navigate to="/login" replace />
+          )
+        }
+      />
+      <Route
+        path="*"
+        element={<Navigate to={authToken ? redirectTarget() : "/login"} replace />}
+      />
+    </Routes>
+  );
+}
+
+// The three-panel app shell (feature tree / viewport / chat) plus
+// titlebar. Mounted only once authenticated (see the route guards
+// above). `projectId` comes from the URL, not local state -- switching
+// projects, creating one, or deleting the current one all navigate
+// rather than setState, so the URL is always an accurate, shareable,
+// back/forward-able description of what's open.
+function ProjectWorkspace({ currentUser, onLogout }) {
+  const navigate = useNavigate();
+  const { projectId } = useParams(); // undefined on the bare "/projects" route
 
   const [messages, setMessages] = useState([GREETING]);
   const [projects, setProjects] = useState([]);
-  const [projectId, setProjectId] = useState(null);
   const [jsonIr, setJsonIr] = useState(null);
   const [glbBase64, setGlbBase64] = useState(null);
   const [stats, setStats] = useState(null);
@@ -166,10 +232,6 @@ export default function App() {
   const currentProjectName =
     projects.find((p) => p.id === projectId)?.name ?? null;
 
-  // Refreshes both the current project's version/undo-redo state AND the
-  // project list (whose ordering is by updated_at, so any mutating action
-  // -- generate/undo/redo/apply -- can move the current project to the
-  // top). One combined helper so every mutation site only needs one call.
   const refreshHistory = useCallback(async (pid) => {
     try {
       const [proj, list] = await Promise.all([getProject(pid), listProjects()]);
@@ -179,8 +241,7 @@ export default function App() {
       setCanRedo(proj.can_redo);
       setProjects(list);
     } catch {
-      // non-fatal -- history/list just won't refresh, not worth
-      // surfacing as a chat error on top of whatever action triggered this
+      // non-fatal -- history/list just won't refresh
     }
   }, []);
 
@@ -194,13 +255,15 @@ export default function App() {
     setCanRedo(false);
   }, []);
 
-  // Shared by mount-restore and manual project switching -- loads a
-  // project's current version + history into state. Replaces messages
-  // entirely (this is "open a different part," not "continue this chat").
+  // Loads one project's current version + history into state. Used by
+  // the URL-driven effect below for every case that used to be "mount
+  // restore" vs. "manual switch" -- those are the same operation now,
+  // just triggered by a route param changing instead of two separate
+  // call sites.
   const loadProject = useCallback(async (id) => {
     const proj = await getProject(id);
     localStorage.setItem(PROJECT_KEY, id);
-    setProjectId(id);
+
     setVersionIndex(proj.current_version_index);
     setVersionCount(proj.version_count);
     setCanUndo(proj.can_undo);
@@ -229,43 +292,71 @@ export default function App() {
     setMessages([GREETING, ...restored]);
   }, []);
 
-  // on mount: populate the project switcher, and restore a previous
-  // session if we have one. Gated on authToken (only meaningful once the
-  // localStorage-restore effect above has run) so this doesn't fire
-  // before a persisted session -- or a fresh login -- has set the
-  // Authorization header api.js needs.
+  // Populate the project switcher once per mount.
   useEffect(() => {
-    if (!authToken) return;
     (async () => {
-      setIsLoading(true);
       try {
-        const list = await listProjects();
-        setProjects(list);
+        setProjects(await listProjects());
       } catch {
         // non-fatal -- switcher just starts empty
       }
+    })();
+  }, []);
 
+  // The URL is authoritative. No :projectId ("/projects" bare) -> check
+  // the last-opened hint and redirect to it, or show the empty state if
+  // there isn't one. A :projectId -> load it, for every reason that
+  // param could have changed (first mount on a deep link, the switcher,
+  // browser back/forward, a fresh navigate() after create/delete).
+  useEffect(() => {
+    if (!projectId) {
       const stored = localStorage.getItem(PROJECT_KEY);
       if (stored) {
-        try {
-          await loadProject(stored);
-        } catch {
-          // stale/deleted project -- start fresh rather than block the UI
-          localStorage.removeItem(PROJECT_KEY);
-        }
+        navigate(`/projects/${stored}`, { replace: true });
+      } else {
+        clearPartState();
+        setMessages([GREETING]);
       }
-      setIsLoading(false);
-    })();
-  }, [authToken, loadProject]);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoading(true);
+    loadProject(projectId)
+      .catch((err) => {
+        if (cancelled) return;
+        // stale/deleted project, or one this user doesn't own -- drop
+        // the stale hint and bounce to the bare workspace rather than
+        // getting stuck on a route that can never load.
+        localStorage.removeItem(PROJECT_KEY);
+        setMessages((prev) => [
+          ...prev,
+          makeMessage("assistant", `Couldn't load that part: ${err.message}`, {
+            isError: true,
+          }),
+        ]);
+        navigate("/projects", { replace: true });
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally keyed on projectId only -- loadProject/navigate are
+    // stable-enough callbacks and re-running this on their identity would
+    // defeat the point of "load once per URL change."
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   const ensureProject = useCallback(async () => {
     if (projectId) return projectId;
     const proj = await createProject();
     localStorage.setItem(PROJECT_KEY, proj.id);
-    setProjectId(proj.id);
     setProjects((prev) => [proj, ...prev]);
+    navigate(`/projects/${proj.id}`);
     return proj.id;
-  }, [projectId]);
+  }, [projectId, navigate]);
 
   const handleSend = useCallback(
     async (prompt) => {
@@ -372,9 +463,8 @@ export default function App() {
     }
   }, [projectId, canRedo, isLoading, applyVersion, refreshHistory]);
 
-  // Structured-editing fallback (Phase 2 item 4): applies a directly-
-  // edited feature tree, bypassing the model. Deliberately does NOT catch
-  // errors here -- FeatureTreePanel's per-item edit form needs the
+  // Structured-editing fallback (Phase 2 item 4). Deliberately does NOT
+  // catch errors here -- FeatureTreePanel's per-item edit form needs the
   // rejection to propagate so it can show the error inline next to the
   // field being edited, rather than only in the chat log.
   const handleApplyEdit = useCallback(
@@ -401,9 +491,6 @@ export default function App() {
     [projectId, refreshHistory],
   );
 
-  // Export/download (the other Phase-2-adjacent gap): triggers an actual
-  // browser download via a Blob + temporary <a>. Errors surface in chat,
-  // consistent with every other action here, rather than a silent failure.
   const handleDownload = useCallback(
     async (format) => {
       if (!projectId) return;
@@ -435,10 +522,8 @@ export default function App() {
     try {
       const proj = await createProject("Untitled part");
       localStorage.setItem(PROJECT_KEY, proj.id);
-      setProjectId(proj.id);
-      clearPartState();
-      setMessages([GREETING]);
       setProjects((prev) => [proj, ...prev]);
+      navigate(`/projects/${proj.id}`);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -449,26 +534,14 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [clearPartState]);
+  }, [navigate]);
 
   const handleSwitchProject = useCallback(
-    async (id) => {
+    (id) => {
       if (id === projectId || isLoading) return;
-      setIsLoading(true);
-      try {
-        await loadProject(id);
-      } catch (err) {
-        setMessages((prev) => [
-          ...prev,
-          makeMessage("assistant", `Couldn't load that part: ${err.message}`, {
-            isError: true,
-          }),
-        ]);
-      } finally {
-        setIsLoading(false);
-      }
+      navigate(`/projects/${id}`);
     },
-    [projectId, isLoading, loadProject],
+    [projectId, isLoading, navigate],
   );
 
   const handleDeleteProject = useCallback(
@@ -479,9 +552,7 @@ export default function App() {
         setProjects((prev) => prev.filter((p) => p.id !== id));
         if (id === projectId) {
           localStorage.removeItem(PROJECT_KEY);
-          setProjectId(null);
-          clearPartState();
-          setMessages([GREETING]);
+          navigate("/projects");
         }
       } catch (err) {
         setMessages((prev) => [
@@ -496,14 +567,10 @@ export default function App() {
         ]);
       }
     },
-    [projectId, clearPartState],
+    [projectId, navigate],
   );
 
-  // Renames a project via the switcher dropdown's inline edit field. The
-  // project list is the only place a name lives client-side (there's no
-  // separate "current project" object) -- patching the list in place
-  // keeps currentProjectName (derived below) correct without an extra
-  // round-trip.
+  // The project list is the only place a name lives client-side.
   const handleRenameProject = useCallback(async (id, name) => {
     try {
       const updated = await renameProject(id, name);
@@ -520,41 +587,18 @@ export default function App() {
     }
   }, []);
 
-  // ---- auth gate: everything above this is still just hook setup, no
-  // rendering, so it's fine for these hooks to exist even while logged
-  // out -- React requires hooks to run unconditionally on every render.
-  // authRestored avoids a one-frame flash of the login screen while the
-  // localStorage-restore effect runs on first mount.
-  if (!authRestored) {
-    return null;
-  }
-  if (!authToken) {
-    return authView === "login" ? (
-      <LoginPage
-        onLogin={handleLogin}
-        onSwitchToSignup={() => setAuthView("signup")}
-        sessionExpired={sessionExpired}
-      />
-    ) : (
-      <SignupPage
-        onSignup={handleSignup}
-        onSwitchToLogin={() => setAuthView("login")}
-      />
-    );
-  }
-
   return (
     <div className="app-shell">
       <ProjectBar
         projects={projects}
-        currentProjectId={projectId}
+        currentProjectId={projectId ?? null}
         currentProjectName={currentProjectName}
         currentUserEmail={currentUser?.email}
         onSwitch={handleSwitchProject}
         onCreate={handleCreateProject}
         onDelete={handleDeleteProject}
         onRename={handleRenameProject}
-        onLogout={handleLogout}
+        onLogout={onLogout}
       />
       <div className="app-layout">
         <FeatureTreePanel
