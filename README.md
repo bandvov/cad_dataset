@@ -127,6 +127,23 @@ training data. Pipeline order:
     the gated output) or automated (compose job that runs `docker compose
     up train` when the gate passes).
 
+**Auth (flywheel-auth fix, all 5 steps done)**: steps 1-3 above
+(`mine_flywheel_data.py`, `mine_flywheel_pairs.py`, and by extension
+`mine_flywheel_repairs.py`/`mine_flywheel_edits.py`, which import from
+them) now require `--auth-token` — the session token of a user with
+`is_admin=True` (grant one via `llm-service/app/make_admin.py`; also
+readable from the `LLM_SERVICE_ADMIN_TOKEN` env var). The log-fetching
+calls hit `llm-service`'s admin-scoped `/v1/admin/logs*` routes rather
+than the per-user `/v1/logs*` ones, since mining needs to see every
+user's production events, not just one caller's own. **Known remaining
+limitation**: version-fetch (resolving a fix's `json_ir` via `GET
+/v1/projects/{id}/versions/{index}`) is still owner-scoped — an admin
+token only resolves fixes for projects it happens to own; a failed fetch
+here degrades to "counted as unresolved," not a crash. See
+`flywheel_common.py`'s docstring for the full caveat. Verified for real
+against a live `uvicorn` instance + seeded SQLite data, not just
+syntax-checked — see `SESSION_HANDOFF.md`.
+
 ## Selector convention (Fillet/Chamfer/Shell openings)
 
 Selectors are declarative, not raw edge indices (which aren't stable
