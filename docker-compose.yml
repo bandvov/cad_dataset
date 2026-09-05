@@ -102,6 +102,13 @@ services:
       geometry:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
 
   frontend:
     build:
@@ -119,5 +126,6 @@ services:
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     depends_on:
-      - llm-service
+      llm-service:
+        condition: service_healthy
     restart: unless-stopped
