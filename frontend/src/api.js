@@ -56,7 +56,8 @@ async function extractErrorDetail(res) {
     // FastAPI's HTTPException(detail={...}) shape (error_type/error dict)
     // vs. a plain string detail -- normalize to a readable string either
     // way, since template-stringing an object gives "[object Object]".
-    detail = typeof raw === "string" ? raw : raw?.error ?? JSON.stringify(raw);
+    detail =
+      typeof raw === "string" ? raw : (raw?.error ?? JSON.stringify(raw));
   } catch {
     // response wasn't JSON, keep statusText
   }
@@ -65,7 +66,9 @@ async function extractErrorDetail(res) {
 
 async function handleResponse(res) {
   if (!res.ok) {
-    throw new Error(`llm-service ${res.status}: ${await extractErrorDetail(res)}`);
+    throw new Error(
+      `llm-service ${res.status}: ${await extractErrorDetail(res)}`,
+    );
   }
   return res.json();
 }
@@ -73,7 +76,8 @@ async function handleResponse(res) {
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
 
@@ -117,20 +121,19 @@ export async function logout() {
 }
 
 /**
- * Calls llm-service's stateless POST /v1/generate (no persistence --
- * caller passes base_ir explicitly). Prefer generateInProject() below for
- * the normal product flow; this is for one-off / no-session use.
- * Deliberately NOT behind auth on the backend (see main.py), so no
- * Authorization header and no authFetch here either.
+ * Calls llm-service's (now authenticated) POST /v1/generate (no project
+ * persistence -- caller passes base_ir explicitly). Prefer
+ * generateInProject() below for the normal product flow; this is for
+ * one-off / no-session use that still needs a logged-in caller.
  *
  * Response shape (see llm-service/app/main.py):
  *   { success, json_ir, attempts, stats, error, conversation,
  *     file_b64?, content_type? }
  */
 export async function generatePart({ prompt, baseIr, maxAttempts = 3 }) {
-  const res = await fetch(`${API_BASE}/v1/generate`, {
+  const res = await authFetch(`${API_BASE}/v1/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       prompt,
       base_ir: baseIr ?? null,
@@ -209,10 +212,12 @@ export async function getProject(projectId) {
 export async function renderProject(projectId, format = "glb") {
   const res = await authFetch(
     `${API_BASE}/v1/projects/${projectId}/render?format=${format}`,
-    { headers: authHeaders() }
+    { headers: authHeaders() },
   );
   if (!res.ok) {
-    throw new Error(`llm-service ${res.status}: ${await extractErrorDetail(res)}`);
+    throw new Error(
+      `llm-service ${res.status}: ${await extractErrorDetail(res)}`,
+    );
   }
   const buffer = await res.arrayBuffer();
   return arrayBufferToBase64(buffer);
@@ -227,10 +232,12 @@ export async function renderProject(projectId, format = "glb") {
 export async function downloadExport(projectId, format) {
   const res = await authFetch(
     `${API_BASE}/v1/projects/${projectId}/render?format=${format}`,
-    { headers: authHeaders() }
+    { headers: authHeaders() },
   );
   if (!res.ok) {
-    throw new Error(`llm-service ${res.status}: ${await extractErrorDetail(res)}`);
+    throw new Error(
+      `llm-service ${res.status}: ${await extractErrorDetail(res)}`,
+    );
   }
   return res.blob();
 }
@@ -257,28 +264,42 @@ export async function logDownload(projectId) {
   }
 }
 
-export async function generateInProject({ projectId, prompt, maxAttempts = 3 }) {
+export async function generateInProject({
+  projectId,
+  prompt,
+  maxAttempts = 3,
+}) {
   const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/generate`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ prompt, max_attempts: maxAttempts, export_format: "glb" }),
+    body: JSON.stringify({
+      prompt,
+      max_attempts: maxAttempts,
+      export_format: "glb",
+    }),
   });
   return handleResponse(res);
 }
 
 export async function undoProject(projectId) {
-  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/undo?export_format=glb`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
+  const res = await authFetch(
+    `${API_BASE}/v1/projects/${projectId}/undo?export_format=glb`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+    },
+  );
   return handleResponse(res);
 }
 
 export async function redoProject(projectId) {
-  const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/redo?export_format=glb`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
+  const res = await authFetch(
+    `${API_BASE}/v1/projects/${projectId}/redo?export_format=glb`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+    },
+  );
   return handleResponse(res);
 }
 
