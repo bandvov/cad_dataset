@@ -904,3 +904,85 @@ button {
   border: 1px solid var(--border-strong);
   backdrop-filter: blur(2px);
 }
+
+.viewer-toolbar {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.viewer-mode-group,
+.viewer-export-group {
+  display: flex;
+  gap: 6px;
+}
+
+.viewer-mode-btn {
+  background: rgba(27, 30, 36, 0.85);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+
+.viewer-mode-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.viewer-mode-btn-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.viewer-export-select {
+  background: rgba(27, 30, 36, 0.85);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 5px 8px;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+
+.viewer-export-select:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.viewer-export-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.viewer-export-btn {
+  background: rgba(27, 30, 36, 0.85);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+
+.viewer-export-btn:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.viewer-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

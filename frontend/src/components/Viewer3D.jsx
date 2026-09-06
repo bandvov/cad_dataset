@@ -15,38 +15,123 @@ function base64ToArrayBuffer(base64) {
 
 const EXPORT_FORMATS = ["step", "stl", "glb"];
 
-/** Small toolbar of format buttons -- owns its own "which format is
- * currently downloading" state so a slow export only disables itself,
- * not the whole app, and Viewer3D/App.jsx don't need to track it. */
+/** Format select + a single download trigger, replacing the old
+ * one-button-per-format row -- scales better if more formats are added
+ * later, and reads as "pick a format, then download" rather than a wall
+ * of buttons. Owns its own "selected format" and "download in flight"
+ * state so a slow export only disables itself, not the whole toolbar. */
 function ExportBar({ onDownload }) {
-  const [pending, setPending] = useState(null);
+  const [format, setFormat] = useState("glb");
+  const [pending, setPending] = useState(false);
 
-  async function handleClick(format) {
+  async function handleDownload() {
     if (pending) return;
-    setPending(format);
+    setPending(true);
     try {
       await onDownload(format);
     } finally {
-      setPending(null);
+      setPending(false);
     }
   }
 
   return (
-    <div className="viewer-export-bar">
-      {EXPORT_FORMATS.map((format) => (
-        <button
-          key={format}
-          type="button"
-          className="viewer-export-btn"
-          onClick={() => handleClick(format)}
-          disabled={pending !== null}
-          title={`Download ${format.toUpperCase()}`}
-        >
-          {pending === format ? "…" : `↓ ${format.toUpperCase()}`}
-        </button>
-      ))}
+    <div className="viewer-export-group">
+      <select
+        className="viewer-export-select"
+        value={format}
+        onChange={(e) => setFormat(e.target.value)}
+        disabled={pending}
+        title="Export format"
+      >
+        {EXPORT_FORMATS.map((f) => (
+          <option key={f} value={f}>
+            {f.toUpperCase()}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="viewer-export-btn"
+        onClick={handleDownload}
+        disabled={pending}
+        title={`Download ${format.toUpperCase()}`}
+      >
+        {pending ? "…" : "↓ Download"}
+      </button>
     </div>
   );
+}
+
+/** Solid / wireframe toggle -- purely a local rendering preference, no
+ * server round-trip. */
+function RenderModeToggle({ mode, onChange }) {
+  return (
+    <div className="viewer-mode-group">
+      <button
+        type="button"
+        className={`viewer-mode-btn${mode === "solid" ? " viewer-mode-btn-active" : ""}`}
+        onClick={() => onChange("solid")}
+        title="Shaded solid"
+      >
+        Solid
+      </button>
+      <button
+        type="button"
+        className={`viewer-mode-btn${mode === "wireframe" ? " viewer-mode-btn-active" : ""}`}
+        onClick={() => onChange("wireframe")}
+        title="Wireframe"
+      >
+        Wireframe
+      </button>
+    </div>
+  );
+}
+
+/** Applies the current render mode to a loaded model in place -- swaps
+ * materials and adds/removes an EdgesGeometry overlay per mesh. Kept
+ * outside the component so both the initial GLTF-load callback and the
+ * toggle-driven effect can call the exact same logic. */
+function applyRenderMode(model, mode) {
+  model.traverse((child) => {
+    if (!child.isMesh) return;
+
+    // remove any previously-added edge overlay before re-adding, so
+    // toggling back and forth doesn't stack duplicate LineSegments
+    const existingEdges = child.children.filter((c) => c.userData.isEdgeOverlay);
+    for (const e of existingEdges) {
+      child.remove(e);
+      e.geometry.dispose();
+      e.material.dispose();
+    }
+
+    if (mode === "wireframe") {
+      child.material = new THREE.MeshStandardMaterial({
+        color: 0xb8bcc4,
+        metalness: 0.15,
+        roughness: 0.55,
+        transparent: true,
+        opacity: 0.08,
+      });
+      // EdgesGeometry (angle-threshold based) instead of
+      // material.wireframe=true -- the latter draws every triangulation
+      // edge from build123d's glTF export, which is dense on curved
+      // surfaces (fillets, holes) and looks like noise rather than a
+      // clean CAD wireframe.
+      const edgesGeo = new THREE.EdgesGeometry(child.geometry, 15);
+      const edges = new THREE.LineSegments(
+        edgesGeo,
+        new THREE.LineBasicMaterial({ color: 0x4fb8c4 })
+      );
+      edges.userData.isEdgeOverlay = true;
+      child.add(edges);
+    } else {
+      child.material = new THREE.MeshStandardMaterial({
+        color: 0xb8bcc4,
+        metalness: 0.15,
+        roughness: 0.55,
+      });
+    }
+  });
 }
 
 export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) {
@@ -57,6 +142,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
   const currentModelRef = useRef(null);
   const [loadError, setLoadError] = useState(null);
   const [bboxLabel, setBboxLabel] = useState(null);
+  const [renderMode, setRenderMode] = useState("solid");
 
   // one-time scene/camera/renderer/controls setup
   useEffect(() => {
@@ -164,15 +250,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
         // before the bounding-box/camera-framing code below, since that
         // reads the model's transformed (post-rotation) extents.
         model.rotation.x = -Math.PI / 2;
-        model.traverse((child) => {
-          if (child.isMesh) {
-            child.material = new THREE.MeshStandardMaterial({
-              color: 0xb8bcc4,
-              metalness: 0.15,
-              roughness: 0.55,
-            });
-          }
-        });
+        applyRenderMode(model, renderMode);
 
         const box = new THREE.Box3().setFromObject(model);
         const center = box.getCenter(new THREE.Vector3());
@@ -200,7 +278,19 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
         setLoadError("Couldn't render the generated model.");
       }
     );
+    // Intentionally NOT depending on renderMode -- a mode change is
+    // handled by the effect below re-materialing the already-loaded
+    // model in place, not by re-parsing/re-fetching the GLB.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [glbBase64]);
+
+  // re-apply materials when the toggle changes, without touching the
+  // GLB data itself -- the model stays loaded, only its appearance changes
+  useEffect(() => {
+    if (currentModelRef.current) {
+      applyRenderMode(currentModelRef.current, renderMode);
+    }
+  }, [renderMode]);
 
   return (
     <div className="viewer-wrap">
@@ -211,7 +301,13 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
         {bboxLabel && <div className="hud-line">bbox {bboxLabel}</div>}
       </div>
 
-      {hasPart && !isLoading && <ExportBar onDownload={onDownload} />}
+      {hasPart && !isLoading && (
+        <div className="viewer-toolbar">
+          <RenderModeToggle mode={renderMode} onChange={setRenderMode} />
+          <ExportBar onDownload={onDownload} />
+        </div>
+      )}
+
       <div className="viewcube-wrap">
         <ViewCube mainCameraRef={cameraRef} mainControlsRef={controlsRef} />
       </div>
