@@ -40,15 +40,15 @@ everything needed to continue in a fresh conversation.
 
 **`verify_auth_e2e.py`** (repo root) — auth plan step 14: HTTP-driven end-to-end check against a running stack (signup→login→create project; a second user gets 404 on GET/DELETE of the first user's project and it's absent from their list; request-log scoping). Exit 0/1, same convention as `mine_flywheel_gate.py`. Migration (step 8) verification is a flagged **manual** step (`--expect-migrated` prints the `migrate_legacy_owner.py` dry-run command) — no HTTP endpoint exposes legacy row counts by design. **Not run against a live stack in this sandbox** (no network/Docker here) — run it before treating step 14 as confirmed. Does not yet exercise step 13 (rate limiting) — would need a small addition (hammer an endpoint N+1 times, expect a 429) if you want that covered by the same script rather than just the ad-hoc TestClient check done during step 13's implementation.
 
-**Flywheel pipeline** (`mine_flywheel_*.py`, root) — Phase 4, steps 1-5, 7-9 done, step 6 (PII scrub) and steps 10-11 (scheduling, retraining trigger) are TODO:
+**Flywheel pipeline** (`mine_flywheel_*.py`, root) — Phase 4, steps 1-5, 7 done, step 6 (PII scrub) and steps 8-9 (scheduling, retraining trigger) are TODO. **Change this session: removed the standalone chat-format step.** `build_dataset.py --include-flywheel-data` (step 7) already re-checks `verified:true` and hashes `json_ir` itself — feeding it the old `mine_flywheel_chatformat.py` output (a `{record_id, task_type, prompt, completion}`-only shape) meant every record failed the `verified` check and got silently dropped, or would `KeyError` on `json_ir` if that check were bypassed. Step 7 now points at step 5's `flywheel_deduped.jsonl` directly and does its own chat-format conversion internally. Deleted `mine_flywheel_chatformat.py`.
+ (scheduling, retraining trigger) are TODO:
 1. `mine_flywheel_data.py` — log extraction, outcome/date filtering
 2. `mine_flywheel_repairs.py` — walks retry chains to eventual fix
 3. `mine_flywheel_edits.py` — pairs "edited" events, synthesizes instruction via IR diff
 4. `mine_flywheel_verify.py` — re-verifies via `BatchExecutor`, quarantines drift
 5. `mine_flywheel_dedup.py` — dedupes against corpus via `build_dataset.structure_hash`
-7. `mine_flywheel_chatformat.py` — converts via `build_dataset.to_chat_format`
-8. `build_dataset.py --include-flywheel-data` — merge point, re-checks `verified:true` itself
-9. `mine_flywheel_gate.py` — count thresholds, exit 0/1
+7. `build_dataset.py --include-flywheel-data` — merge point, consumes step 5's output directly, re-checks `verified:true` itself, does its own chat-format conversion
+8. `mine_flywheel_gate.py` — count thresholds, exit 0/1
 
 **✅ Flywheel-scripts-vs-auth gap — RESOLVED this session** (was the auth-step-7 gap flagged previously). Five-step fix, all done and verified for real against a live server (see below):
 1. `store.py`: `is_admin` column on `users` + `set_admin()`.
@@ -110,4 +110,4 @@ Files not written by me have repeatedly appeared already-populated in this sandb
 
 **Run `verify_auth_e2e.py` against a real, live stack** (`docker compose up`, then the script) — this is now the single remaining action item in the entire 14-step auth plan. Consider also extending it to confirm step 13's rate limiting against the real deployment, not just the sandbox `TestClient` run documented above.
 
-After that: the PII scrub (Phase 4 step 6), flywheel scheduling/retraining-trigger (steps 10-11), the frontend's not-yet-special-cased 429 handling, and — if cross-user fix coverage in the flywheel turns out to matter — an admin-scoped version-fetch route or ownership bypass (see the flywheel pipeline section's "known remaining limitation" note) remain open.
++After that: the PII scrub (Phase 4 step 6), flywheel scheduling/retraining-trigger (steps 8-9), the frontend's not-yet-special-cased 429 handling, and — if cross-user fix coverage in the flywheel turns out to matter — an admin-scoped version-fetch route or ownership bypass (see the flywheel pipeline section's "known remaining limitation" note) remain open.

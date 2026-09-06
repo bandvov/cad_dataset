@@ -117,12 +117,15 @@ training data. Pipeline order:
 4. `mine_flywheel_verify.py` -- re-verification via real build123d (done)
 5. `mine_flywheel_dedup.py` -- dedup against existing corpus (done)
 6. PII/content scrub -- **not implemented**
-7. `mine_flywheel_chatformat.py` -- chat-format conversion (done)
-8. `build_dataset.py --include-flywheel-data` -- merge into train/val (done)
-9. `mine_flywheel_gate.py` -- volume/quality gate (done)
-10. **TODO**: scheduling -- cron/compose service to run steps 1-9
+7. `build_dataset.py --include-flywheel-data` -- merge into train/val (done).
+   Consumes step 5's output (`flywheel_deduped.jsonl`) directly --
+   `build_dataset.py` runs its own `to_chat_format()` internally as part
+   of the merge, so there's no separate chat-format step between dedup
+   and merge.
+8. `mine_flywheel_gate.py` -- volume/quality gate (done)
+9. **TODO**: scheduling -- cron/compose service to run steps 1-8
     periodically (e.g. weekly) against the production `cad_sessions.db`.
-11. **TODO**: retraining trigger -- hook step 9's gate into
+10. **TODO**: retraining trigger -- hook step 9's gate into
     `training/train.py`, either manual (point `TRAIN_FILE`/`VAL_FILE` at
     the gated output) or automated (compose job that runs `docker compose
     up train` when the gate passes).
