@@ -5,7 +5,8 @@ every downstream feature's size/position is a *fixed formula* of the
 running PartState (base width/height/thickness and whatever the previous
 steps changed), not an independent random draw. Randomness only decides
 (a) which step types appear and in what order, and (b) a handful of
-discrete choices (pattern counts, through vs. blind hole).
+discrete choices (pattern counts, through vs. blind hole, and -- as of
+this version -- which axis/side a fillet or chamfer selector targets).
 
 That discrete "recipe" (step sequence + discrete choices + base dims) is
 stored alongside the record. gen_regenerate.py replays the exact same
@@ -20,7 +21,7 @@ import argparse
 import json
 import random
 
-from primitives import IdGen, rnd, phrase_instruction, Record
+from primitives import IdGen, rnd, phrase_instruction, Record, side_label
 
 
 class PartState:
@@ -47,17 +48,24 @@ def apply_base(state: PartState, idgen: IdGen, features: list) -> str:
 def apply_fillet(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
     r = round(min(state.min_edge * 0.12, 3.0), 2)
     r = max(r, 0.3)
+    # axis/criterion: default to the old Z/max ("top") behavior if a
+    # caller doesn't supply one (e.g. gen_regenerate.py replaying an
+    # older recipe recorded before this field existed).
+    axis = params.get("axis", "Z")
+    criterion = params.get("criterion", "max")
     features.append({"id": idgen.next("fillet"), "feature_type": "Fillet",
-                      "selector": {"of": "edges", "filter_by": "Z", "criterion": "max"}, "radius": r})
-    return f"round the top edges with a {r}mm fillet"
+                      "selector": {"of": "edges", "filter_by": axis, "criterion": criterion}, "radius": r})
+    return f"round the {side_label(axis, criterion)} edges with a {r}mm fillet"
 
 
 def apply_chamfer(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
     length = round(min(state.min_edge * 0.12, 3.0), 2)
     length = max(length, 0.3)
+    axis = params.get("axis", "Z")
+    criterion = params.get("criterion", "min")
     features.append({"id": idgen.next("chamfer"), "feature_type": "Chamfer",
-                      "selector": {"of": "edges", "filter_by": "Z", "criterion": "min"}, "length": length})
-    return f"chamfer the bottom edges by {length}mm"
+                      "selector": {"of": "edges", "filter_by": axis, "criterion": criterion}, "length": length})
+    return f"chamfer the {side_label(axis, criterion)} edges by {length}mm"
 
 
 def apply_hole(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
@@ -136,7 +144,8 @@ STEP_WEIGHTS = {
 
 def sample_recipe(rng: random.Random, n_extra: int) -> dict:
     """The discrete part of the design: step order + any params that
-    aren't a pure formula of state (counts, through/blind)."""
+    aren't a pure formula of state (counts, through/blind, and now
+    fillet/chamfer axis+criterion)."""
     w, h = rnd("med_dim", rng), rnd("med_dim", rng)
     t = rnd("extrude_med", rng)
     names = list(STEP_REGISTRY.keys())
@@ -158,6 +167,13 @@ def sample_recipe(rng: random.Random, n_extra: int) -> dict:
             params["count"] = rng.randint(2, 5)
         elif name == "circular_pattern":
             params["count"] = rng.randint(3, 6)
+        elif name in ("fillet", "chamfer"):
+            # previously always Z/max ("top") for fillet and Z/min
+            # ("bottom") for chamfer -- every training record described
+            # the same side regardless of instruction wording, so the
+            # fine-tuned model never learned to emit an X/Y filter_by.
+            params["axis"] = rng.choice(["X", "Y", "Z"])
+            params["criterion"] = rng.choice(["max", "min"])
         steps.append({"step": name, "params": params})
     return {"base": {"w": w, "h": h, "t": t}, "steps": steps}
 

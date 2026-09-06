@@ -53,6 +53,33 @@ def rnd(key: str, rng: random.Random) -> float:
     return round(rng.uniform(lo, hi), 2)
 
 
+# ---------------------------------------------------------------------------
+# edge-selector side labels -- shared by gen_chains.py and
+# gen_single_feature.py so Fillet/Chamfer instructions describe the same
+# side the selector actually targets. Before this, every generator
+# hardcoded {"filter_by": "Z", "criterion": "max"/"min"} ("top"/"bottom")
+# regardless of what the instruction said, so the fine-tuned model never
+# saw a training example of an X/Y-axis selector and had no way to learn
+# to emit one for a "right side" / "left edge" / "front" instruction.
+# ---------------------------------------------------------------------------
+SIDE_LABELS = {
+    ("X", "max"): "right",
+    ("X", "min"): "left",
+    ("Y", "max"): "back",
+    ("Y", "min"): "front",
+    ("Z", "max"): "top",
+    ("Z", "min"): "bottom",
+}
+
+
+def side_label(axis: str, criterion: str) -> str:
+    """Human-readable side name for a {filter_by, criterion} edge selector
+    -- e.g. ("X", "max") -> "right". Falls back to "top" for any
+    unrecognized combination rather than raising, since this only feeds
+    instruction phrasing, not the IR itself."""
+    return SIDE_LABELS.get((axis, criterion), "top")
+
+
 def safe_fillet_radius(edge_length: float, rng: random.Random) -> float:
     """Fillet radius must stay well under half the shortest adjacent edge
     to avoid self-intersecting the fillet -- keep a comfortable margin."""

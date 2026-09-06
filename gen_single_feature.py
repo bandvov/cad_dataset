@@ -14,7 +14,7 @@ import argparse
 import json
 import random
 
-from primitives import IdGen, rnd, safe_fillet_radius, safe_hole_depth, phrase_instruction, Record
+from primitives import IdGen, rnd, safe_fillet_radius, safe_hole_depth, phrase_instruction, Record, side_label
 
 
 def _base_block(rng: random.Random, idgen: IdGen):
@@ -124,13 +124,18 @@ def gen_fillet(rng: random.Random) -> Record:
     idgen = IdGen()
     features, (w, h, t), ex_id = _base_block(rng, idgen)
     r = safe_fillet_radius(min(w, h, t), rng)
+    # axis/criterion varied so the model actually learns filter_by X/Y,
+    # not just Z/max ("top") -- see primitives.side_label / SESSION_HANDOFF.md
+    axis = rng.choice(["X", "Y", "Z"])
+    criterion = rng.choice(["max", "min"])
+    side = side_label(axis, criterion)
     fid = idgen.next("fillet")
     features.append({
         "id": fid, "feature_type": "Fillet",
-        "selector": {"of": "edges", "filter_by": "Z", "criterion": "max"},
+        "selector": {"of": "edges", "filter_by": axis, "criterion": criterion},
         "radius": r,
     })
-    instr = phrase_instruction(f"a plate with a {r}mm fillet on the top edges", "rounded top perimeter", rng)
+    instr = phrase_instruction(f"a plate with a {r}mm fillet on the {side} edges", f"rounded {side} perimeter", rng)
     return Record("generate", instr, {"features": features}, complexity=2)
 
 
@@ -138,13 +143,16 @@ def gen_chamfer(rng: random.Random) -> Record:
     idgen = IdGen()
     features, (w, h, t), ex_id = _base_block(rng, idgen)
     length = safe_fillet_radius(min(w, h, t), rng)
+    axis = rng.choice(["X", "Y", "Z"])
+    criterion = rng.choice(["max", "min"])
+    side = side_label(axis, criterion)
     fid = idgen.next("chamfer")
     features.append({
         "id": fid, "feature_type": "Chamfer",
-        "selector": {"of": "edges", "filter_by": "Z", "criterion": "max"},
+        "selector": {"of": "edges", "filter_by": axis, "criterion": criterion},
         "length": length,
     })
-    instr = phrase_instruction(f"a plate with a {length}mm chamfer on the top edges", "beveled top perimeter", rng)
+    instr = phrase_instruction(f"a plate with a {length}mm chamfer on the {side} edges", f"beveled {side} perimeter", rng)
     return Record("generate", instr, {"features": features}, complexity=2)
 
 
