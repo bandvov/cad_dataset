@@ -25,6 +25,18 @@ key at the root with each body's own nested "features" list, which is
 already unambiguous against this shape without any extra tag. validate_ir()
 below silently ignores an "operation" key if one is still present (old
 generated data, old stored project versions), so nothing needs migrating.
+
+NOTE ON THE "near_point" SELECTOR (added): filter_by X/Y/Z + criterion
+max/min and filter_by GeomType/CIRCLE can't isolate a single hole's rim
+edge -- axis-based grouping can't express "the edge around this specific
+hole," and GeomType: CIRCLE matches every circular edge in the part (OCCT
+classifies all arcs as CIRCLE regardless of subtended angle, so other
+holes AND rounded corners get swept in too). near_point matches
+edges/faces whose bounding-box center is within `tolerance` of `point`,
+reusing the position a Hole feature already records in its `location`.
+Any coordinate in `point` may be `null` to mean "don't constrain this
+axis" -- this is what lets one selector match BOTH rim edges of a
+through-hole (null out Z) instead of only the one at a specific depth.
 """
 
 from __future__ import annotations
@@ -112,6 +124,11 @@ BOOLEAN_OPS = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
 SKETCH_MODES = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
 SELECTOR_AXES = {"X", "Y", "Z"}
 SELECTOR_CRITERIA = {"max", "min", "all"}
+# filter_by values recognized by _resolve_selector, beyond the bare axis
+# names in SELECTOR_AXES -- kept as its own set so validate_ir can check
+# selector.filter_by without hardcoding the axis/non-axis distinction
+# twice.
+SELECTOR_FILTER_KINDS = {"GeomType", "near_point"}
 
 
 class SchemaError(ValueError):
@@ -143,6 +160,9 @@ BOUNDS = {
     "max_dimension_mm": 10_000.0,       # 10 meters -- generous for "a part"
     "max_fillet_or_chamfer_mm": 500.0,
     "max_revolve_angle_deg": 360.0 * 10,  # allow a few extra wraps, not thousands
+    "max_near_point_tolerance_mm": 50.0,  # a near_point selector this loose isn't
+                                           # isolating anything -- it's a hallucinated
+                                           # "match everything" in disguise
 }
 
 
@@ -206,6 +226,14 @@ def validate_bounds(ir: dict) -> list[str]:
             key = "radius" if ftype == "Fillet" else "length"
             _check_dim(feat.get(key), f"'{fid}'.{key}", violations,
                        max_override=BOUNDS["max_fillet_or_chamfer_mm"])
+            sel = feat.get("selector", {})
+            if sel.get("filter_by") == "near_point":
+                tol = sel.get("tolerance", 1e-3)
+                if isinstance(tol, (int, float)) and tol > BOUNDS["max_near_point_tolerance_mm"]:
+                    violations.append(
+                        f"'{fid}'.selector.tolerance={tol} exceeds max "
+                        f"{BOUNDS['max_near_point_tolerance_mm']} (too loose to isolate an edge)"
+                    )
 
         elif ftype == "Shell":
             _check_dim(feat.get("thickness"), f"'{fid}'.thickness", violations)
@@ -304,8 +332,47 @@ def validate_ir(ir: dict) -> None:
             sel = feat["selector"]
             if sel.get("of") not in ("edges", "faces"):
                 raise SchemaError(f"{ftype} '{fid}' selector.of must be 'edges' or 'faces'")
-            if sel.get("criterion") not in SELECTOR_CRITERIA:
-                raise SchemaError(f"{ftype} '{fid}' selector.criterion invalid")
+
+            filter_by = sel.get("filter_by")
+            if filter_by == "near_point":
+                # near_point is its own validated shape -- criterion
+                # doesn't apply to it (there's nothing to group_by), so
+                # it's deliberately NOT run through the SELECTOR_CRITERIA
+                # check below.
+                point = sel.get("point")
+                if not isinstance(point, (list, tuple)) or len(point) != 3:
+                    raise SchemaError(
+                        f"{ftype} '{fid}' selector.filter_by=near_point requires a 3-element "
+                        f"'point' [x, y, z] (any coordinate may be null to leave it unconstrained)"
+                    )
+                for coord in point:
+                    if coord is not None and not isinstance(coord, (int, float)):
+                        raise SchemaError(
+                            f"{ftype} '{fid}' selector.point coordinates must be numbers or null"
+                        )
+                if all(c is None for c in point):
+                    raise SchemaError(
+                        f"{ftype} '{fid}' selector.point cannot have every coordinate null "
+                        f"-- that matches every edge, same as filter_by=all"
+                    )
+                tolerance = sel.get("tolerance", 1e-3)
+                if not isinstance(tolerance, (int, float)) or tolerance <= 0:
+                    raise SchemaError(
+                        f"{ftype} '{fid}' selector.tolerance must be a positive number"
+                    )
+            elif filter_by in SELECTOR_AXES or filter_by == "GeomType" or filter_by in (None, "all"):
+                if sel.get("criterion") not in SELECTOR_CRITERIA:
+                    raise SchemaError(f"{ftype} '{fid}' selector.criterion invalid")
+                if filter_by == "GeomType" and "geom_type" not in sel:
+                    raise SchemaError(
+                        f"{ftype} '{fid}' selector.filter_by=GeomType requires 'geom_type'"
+                    )
+            else:
+                raise SchemaError(
+                    f"{ftype} '{fid}' selector.filter_by unrecognized: {filter_by!r} "
+                    f"(expected an axis {sorted(SELECTOR_AXES)}, {sorted(SELECTOR_FILTER_KINDS)}, "
+                    f"'all', or null)"
+                )
 
         op = feat.get("operation")
         if op is not None and op not in BOOLEAN_OPS:

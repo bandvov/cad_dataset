@@ -13,6 +13,19 @@ NOT been executed against a real build123d install in this sandbox (no
 network access here to pip install it). Before trusting generated data,
 run this against your local build123d install and fix any API drift --
 see README.md "Verification" section for the smoke test to run first.
+
+NOTE ON THE "near_point" SELECTOR (added): see schema.py's module
+docstring for the motivation (axis/GeomType selectors can't isolate a
+single hole's rim edge). _resolve_selector's near_point branch matches
+edges/faces whose bounding-box center is within `tolerance` of `point`,
+treating a `null` coordinate in `point` as "don't constrain this axis" --
+that's what lets one selector match both rim edges of a through-hole (by
+nulling out Z) instead of only the one at a specific depth. This was
+written against the documented `Shape.bounding_box()` API (works on
+Edge/Face/Solid alike in build123d) rather than a per-entity `.center()`,
+since `.center()`'s availability/semantics vary more across entity types
+-- confirm this still gets you what you want on your installed version
+before trusting it for anything beyond a quick check.
 """
 
 from __future__ import annotations
@@ -306,6 +319,35 @@ class IRCompiler:
     # ------------------------------------------------------------------ #
     # solid-modifying features (selectors)
     # ------------------------------------------------------------------ #
+    def _entity_center(self, entity):
+        """Bounding-box center of one edge/face -- used by the near_point
+        selector. Uses bounding_box() rather than a per-entity .center()
+        since bounding_box() is documented to work uniformly across
+        Edge/Face/Solid in build123d, whereas .center()'s availability and
+        exact semantics (centroid vs. bbox center) vary more by entity
+        type and version. For a straight or gently-curved edge (which is
+        all a hole rim or a sketch-primitive edge ever is) the bbox center
+        coincides closely enough with the edge's true center to be a
+        reliable match target at typical tolerances (see BOUNDS in
+        schema.py's max_near_point_tolerance_mm)."""
+        bb = entity.bounding_box()
+        return (
+            (bb.min.X + bb.max.X) / 2,
+            (bb.min.Y + bb.max.Y) / 2,
+            (bb.min.Z + bb.max.Z) / 2,
+        )
+
+    def _matches_near_point(self, entity, point, tolerance: float) -> bool:
+        cx, cy, cz = self._entity_center(entity)
+        px, py, pz = point
+        # a None coordinate means "don't constrain this axis" -- this is
+        # what lets one selector match both rim edges of a through-hole by
+        # nulling out Z (see schema.py's module docstring)
+        dx = 0.0 if px is None else (cx - px)
+        dy = 0.0 if py is None else (cy - py)
+        dz = 0.0 if pz is None else (cz - pz)
+        return (dx * dx + dy * dy + dz * dz) ** 0.5 <= tolerance
+
     def _resolve_selector(self, shape, selector: dict):
         bd = self.bd
         of = selector["of"]
@@ -326,6 +368,12 @@ class IRCompiler:
         elif filter_by == "GeomType":
             geom_type = getattr(bd.GeomType, selector["geom_type"])
             chosen = entities.filter_by(geom_type)
+        elif filter_by == "near_point":
+            point = selector["point"]
+            tolerance = selector.get("tolerance", 1e-3)
+            chosen = type(entities)(
+                e for e in entities if self._matches_near_point(e, point, tolerance)
+            )
         elif filter_by is None or filter_by == "all":
             chosen = entities
         else:
