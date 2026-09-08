@@ -375,6 +375,21 @@ class Orchestrator:
                            "error_type": result.get("error_type"), "error": last_error}
                     repair_turn = chat_format.render_repair_user_turn(broken_ir=ir, error=last_error)
 
+                # Dedup: repair_turn (just built) already restates this
+                # attempt's full output verbatim -- broken_ir in the
+                # compile-failure branch, or the retry instruction in the
+                # parse-failure branch. The raw completion sitting as the
+                # immediately-preceding assistant message in `messages`
+                # (what's actually POSTed to llama.cpp on the next call,
+                # not just logged) is now redundant weight -- every retry
+                # would otherwise resend this attempt's tree twice in the
+                # same request. Compact it in `messages` only --
+                # `conversation` (returned to the caller / used for
+                # debugging and the request log) keeps the real raw text.
+                messages[-1] = {
+                    "role": "assistant",
+                    "content": "[response omitted -- restated in the next message]",
+                }
                 messages.append({"role": "user", "content": repair_turn})
                 conversation.append({"role": "user", "content": repair_turn})
                 if attempt < max_attempts:
