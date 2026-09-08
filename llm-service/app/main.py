@@ -48,6 +48,17 @@ cross-user data no matter what header it sends). This step only adds the
 dependency itself so it exists ahead of the routes that will use it, same
 staging approach step 9's RATE_LIMIT_PER_MINUTE knob took before step
 13's middleware landed.
+
+CHANGE (usage/timing surfacing): every response shape that carries a
+GenerateResult (POST /v1/generate, POST /v1/generate/stream's terminal
+NDJSON line, POST /v1/projects/{id}/generate) now also includes
+"elapsed_s" (total wall-clock seconds for the whole generate call,
+including every repair attempt) and "usage" ({"prompt_tokens",
+"completion_tokens", "total_tokens"}, summed across every LLM call the
+loop made). Both come straight from orchestrator.GenerateResult /
+generate_stream()'s terminal event -- see that module's docstring for how
+they're accumulated -- this file just forwards them, it doesn't compute
+anything itself.
 """
 
 from __future__ import annotations
@@ -228,7 +239,10 @@ async def generate(req: GenerateRequest, user: dict = Depends(get_current_user))
     that already carry a valid session token). success=false with a
     populated `error` means the model couldn't produce valid geometry
     within max_attempts -- surface that to the user rather than the raw
-    IR; `conversation` is included for debugging/observability."""
+    IR; `conversation` is included for debugging/observability.
+    `elapsed_s`/`usage` (see orchestrator.py's docstring) are included
+    for both success and failure, so a failed/exhausted attempt still
+    shows the user what it cost."""
     result = await orchestrator.generate(req.prompt, req.base_ir, req.max_attempts)
     STORE.log_event(
         project_id=None, action="generate", prompt=req.prompt,
@@ -243,6 +257,8 @@ async def generate(req: GenerateRequest, user: dict = Depends(get_current_user))
         "stats": result.stats,
         "error": result.error,
         "conversation": result.conversation,
+        "elapsed_s": result.elapsed_s,
+        "usage": result.usage,
     }
     if result.success and req.export_format:
         try:
@@ -260,7 +276,10 @@ async def generate_stream(req: GenerateRequest, user: dict = Depends(get_current
     """Same loop as /v1/generate, streamed as NDJSON. Same auth
     requirement as /v1/generate above -- FastAPI resolves dependencies
     before the StreamingResponse generator starts, so this doesn't
-    complicate the streaming itself.
+    complicate the streaming itself. The terminal "success"/"failure"
+    line already carries "elapsed_s"/"usage" straight from
+    orchestrator.generate_stream() -- nothing extra needed here, this
+    endpoint just relays every event as-is.
 
     curl example:
       curl -N -X POST localhost:8001/v1/generate/stream \\
@@ -441,6 +460,8 @@ async def project_generate(project_id: str, req: ProjectGenerateRequest,
         "stats": result.stats,
         "error": result.error,
         "conversation": result.conversation,
+        "elapsed_s": result.elapsed_s,
+        "usage": result.usage,
     }
     version_index = None
     if result.success:
@@ -470,7 +491,10 @@ async def project_apply_edit(project_id: str, req: ApplyEditRequest,
     edited feature tree without going through the model at all. Validates
     against the geometry service via orchestrator.compile_only() and, on
     success, appends a new version with the SAME semantics as a
-    model-generated edit. `prompt` is stored as None for these versions."""
+    model-generated edit. `prompt` is stored as None for these versions.
+    No LLM call happens on this path, so there's no elapsed/token cost to
+    report -- the response intentionally has no "elapsed_s"/"usage" keys,
+    unlike the generate endpoints above."""
     _require_owned_project(project_id, user)
 
     result = await orchestrator.compile_only(req.json_ir)

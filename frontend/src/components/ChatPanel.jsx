@@ -41,6 +41,14 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
               {m.role === "user" ? "You" : "Assistant"}
             </div>
             <div className="chat-message-content">{m.content}</div>
+            {/* elapsed time + prompt/completion token counts for this
+                generation, when available (see App.jsx's
+                formatGenerateMeta) -- e.g. "2.4s · 812 in / 340 out tok ·
+                2 attempts". Absent for messages with nothing to report
+                (greetings, undo/redo, structured edits that never called
+                the LLM), so this renders nothing rather than an empty
+                line. */}
+            {m.meta && <div className="chat-message-meta">{m.meta}</div>}
           </div>
         ))}
         {isLoading && (

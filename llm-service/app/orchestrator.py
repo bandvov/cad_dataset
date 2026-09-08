@@ -71,6 +71,27 @@ column 694 (char 693)"), taken from whichever parse attempt got furthest
 before giving up. This is a signature change -- every call site needs the
 tuple-unpack, not just the one in generate_stream() below.
 
+NOTE on usage/timing tracking (added): _chat() now also returns the
+raw `usage` object llama.cpp's OpenAI-compatible endpoint reports
+(`{"prompt_tokens", "completion_tokens", "total_tokens"}`) alongside the
+completion text. generate_stream() accumulates prompt/completion tokens
+across every attempt (a repair turn is a second LLM call, so a 2-attempt
+generation's token cost is the SUM of both calls, not just the last one)
+and tracks total wall-clock elapsed time from the moment generate_stream()
+is entered to whichever terminal event (success/failure) it yields --
+elapsed time as the caller actually experienced it, not just the sum of
+individual HTTP call durations (which would silently drop time spent in
+between, e.g. JSON parsing or compiling against the geometry service).
+Both are attached to every terminal event and to GenerateResult, so any
+caller (buffered /v1/generate, streamed /v1/generate/stream, project-
+scoped generate) gets the same numbers from the same place -- no second
+timing/accounting implementation to drift out of sync with this one.
+llama.cpp is expected to report `usage` on every /v1/chat/completions
+response (documented OpenAI-compatible behavior); if a given server build
+omits it, `_accumulate_usage()` just skips that attempt's contribution
+rather than raising, so a missing usage block degrades to "token counts
+under-reported," not a broken request.
+
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
 service. `extract_json()` (the one dependency-free piece) was smoke-
@@ -84,6 +105,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -183,6 +205,16 @@ def extract_json(text: str) -> tuple[dict | None, str | None]:
     return None, last_err
 
 
+def _empty_usage() -> dict:
+    """Zeroed accumulator shape -- always present with all three keys
+    (rather than only whichever ones llama.cpp happened to report) so
+    callers (main.py, the frontend) never need a defensive `?.` chain
+    just to display "0 in / 0 out tokens" on a request that had no
+    successful LLM call at all (e.g. every attempt hit an HTTP error
+    before a response came back)."""
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 @dataclass
 class GenerateResult:
     success: bool
@@ -191,6 +223,8 @@ class GenerateResult:
     stats: dict | None = None
     error: str | None = None
     conversation: list[dict] = field(default_factory=list)
+    elapsed_s: float = 0.0
+    usage: dict = field(default_factory=_empty_usage)
 
 
 class Orchestrator:
@@ -199,7 +233,12 @@ class Orchestrator:
         self.geometry_url = geometry_url.rstrip("/")
         self.http_timeout = http_timeout
 
-    async def _chat(self, client: httpx.AsyncClient, messages: list[dict]) -> str:
+    async def _chat(self, client: httpx.AsyncClient, messages: list[dict]) -> tuple[str, dict | None]:
+        """Returns (content, usage). `usage` is llama.cpp's raw
+        OpenAI-compatible usage object (`{"prompt_tokens",
+        "completion_tokens", "total_tokens"}`) if the response included
+        one, else None -- see module docstring's NOTE on usage/timing
+        tracking for how callers accumulate this across attempts."""
         resp = await client.post(
             f"{self.llama_url}/v1/chat/completions",
             json={"messages": messages, "temperature": 0.0, "max_tokens": 2048},
@@ -208,8 +247,9 @@ class Orchestrator:
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        _debug(f"[orchestrator] <<< raw model output ({len(content)} chars):\n{content}")
-        return content
+        usage = data.get("usage")
+        _debug(f"[orchestrator] <<< raw model output ({len(content)} chars, usage={usage}):\n{content}")
+        return content, usage
 
     async def _compile(self, client: httpx.AsyncClient, ir: dict) -> dict:
         resp = await client.post(
@@ -231,12 +271,32 @@ class Orchestrator:
           {"event": "validating", "attempt": 1}
           {"event": "attempt_failed", "attempt": 1, "error_type": "...", "error": "..."}
           {"event": "repairing", "attempt": 1, "next_attempt": 2}
-          {"event": "success", "attempts": 2, "json_ir": {...}, "stats": {...}, "conversation": [...]}
-        Terminal event is always exactly one of "success" or "failure".
-        This is the single source of truth for the loop; generate() (the
-        non-streaming form) just drains this and returns the terminal
+          {"event": "success", "attempts": 2, "json_ir": {...}, "stats": {...},
+           "conversation": [...], "elapsed_s": 4.87,
+           "usage": {"prompt_tokens": 812, "completion_tokens": 340, "total_tokens": 1152}}
+        Terminal event is always exactly one of "success" or "failure",
+        and both terminal events always carry "elapsed_s" (total wall
+        time from this generator's first line of execution to that event,
+        see module docstring's NOTE on usage/timing tracking) and "usage"
+        (prompt/completion/total tokens summed across every attempt's LLM
+        call). This is the single source of truth for the loop; generate()
+        (the non-streaming form) just drains this and returns the terminal
         event, so there's one implementation, not two copies that can
         drift apart."""
+        start_time = time.monotonic()
+        usage_totals = _empty_usage()
+
+        def _accumulate_usage(usage: dict | None) -> None:
+            if not usage:
+                return
+            for key in usage_totals:
+                val = usage.get(key)
+                if isinstance(val, (int, float)):
+                    usage_totals[key] += val
+
+        def _elapsed() -> float:
+            return round(time.monotonic() - start_time, 3)
+
         if base_ir is not None:
             user_turn = chat_format.render_regenerate_user_turn(base_ir, prompt)
         else:
@@ -258,13 +318,15 @@ class Orchestrator:
                 _debug(f"[orchestrator] --- attempt {attempt}/{max_attempts} ---")
 
                 try:
-                    raw = await self._chat(client, messages)
+                    raw, usage = await self._chat(client, messages)
                 except httpx.HTTPError as e:
                     _debug(f"[orchestrator] LLM request failed: {e}")
                     yield {"event": "failure", "attempts": attempt, "json_ir": last_ir,
-                           "error": f"llm request failed: {e}", "conversation": conversation}
+                           "error": f"llm request failed: {e}", "conversation": conversation,
+                           "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
                     return
 
+                _accumulate_usage(usage)
                 messages.append({"role": "assistant", "content": raw})
                 conversation.append({"role": "assistant", "content": raw})
                 yield {"event": "llm_response", "attempt": attempt, "content": raw}
@@ -299,12 +361,14 @@ class Orchestrator:
                         _debug(f"[orchestrator] geometry service request failed: {e}")
                         yield {"event": "failure", "attempts": attempt, "json_ir": ir,
                                "error": f"geometry service request failed: {e}",
-                               "conversation": conversation}
+                               "conversation": conversation,
+                               "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
                         return
                     if result.get("valid"):
                         _debug(f"[orchestrator] === generate SUCCESS on attempt {attempt} ===")
                         yield {"event": "success", "attempts": attempt, "json_ir": ir,
-                               "stats": result.get("stats"), "conversation": conversation}
+                               "stats": result.get("stats"), "conversation": conversation,
+                               "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
                         return
                     last_error = result.get("error", "unknown validation error")
                     yield {"event": "attempt_failed", "attempt": attempt,
@@ -320,7 +384,8 @@ class Orchestrator:
         _debug(f"[orchestrator] === generate FAILURE -- exhausted {max_attempts} attempts. "
                f"last_error={last_error!r} ===")
         yield {"event": "failure", "attempts": max_attempts, "json_ir": last_ir,
-               "error": last_error, "conversation": conversation}
+               "error": last_error, "conversation": conversation,
+               "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
 
     async def generate(self, prompt: str, base_ir: dict | None = None,
                         max_attempts: int = 3) -> GenerateResult:
@@ -332,11 +397,15 @@ class Orchestrator:
             if event["event"] == "success":
                 return GenerateResult(True, event["json_ir"], event["attempts"],
                                        stats=event.get("stats"),
-                                       conversation=event.get("conversation", []))
+                                       conversation=event.get("conversation", []),
+                                       elapsed_s=event.get("elapsed_s", 0.0),
+                                       usage=event.get("usage") or _empty_usage())
             if event["event"] == "failure":
                 return GenerateResult(False, event.get("json_ir"), event["attempts"],
                                        error=event.get("error"),
-                                       conversation=event.get("conversation", []))
+                                       conversation=event.get("conversation", []),
+                                       elapsed_s=event.get("elapsed_s", 0.0),
+                                       usage=event.get("usage") or _empty_usage())
         # generate_stream() always yields exactly one terminal event -- if
         # we get here, that invariant broke
         return GenerateResult(False, None, max_attempts, error="generator produced no terminal event")

@@ -699,6 +699,18 @@ button {
   color: var(--danger);
 }
 
+/* Elapsed time / token usage readout under an assistant message (see
+   App.jsx's formatGenerateMeta / ChatPanel.jsx). Deliberately quiet --
+   same register as the viewport HUD and feature-tree stats (mono,
+   muted, small) so it reads as a technical readout, not as more prose
+   competing with the actual reply. */
+.chat-message-meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
 .chat-typing {
   color: var(--text-muted);
 }

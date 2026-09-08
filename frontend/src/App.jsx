@@ -43,6 +43,28 @@ function makeMessage(role, content, extra = {}) {
   return { id: nextMessageId++, role, content, ...extra };
 }
 
+// Formats a generate/regenerate result's elapsed time + token usage into
+// one short readout line -- e.g. "2.4s · 812 in / 340 out tokens · 2
+// attempts". Returns null (rendered as nothing, see ChatPanel.jsx) when
+// there's nothing meaningful to show, which covers non-LLM paths like
+// applyEdit() where the response simply has no elapsed_s/usage at all
+// (see llm-service/app/main.py's project_apply_edit docstring).
+function formatGenerateMeta(result) {
+  const parts = [];
+  if (typeof result.elapsed_s === "number") {
+    parts.push(`${result.elapsed_s.toFixed(1)}s`);
+  }
+  const usage = result.usage || {};
+  const hasTokens = usage.prompt_tokens != null || usage.completion_tokens != null;
+  if (hasTokens) {
+    parts.push(`${usage.prompt_tokens ?? 0} in / ${usage.completion_tokens ?? 0} out tok`);
+  }
+  if (result.attempts > 1) {
+    parts.push(`${result.attempts} attempts`);
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
+
 const GREETING = makeMessage(
   "assistant",
   "Describe a part and I'll generate it — then tell me what to change and I'll edit it in place.",
@@ -373,11 +395,9 @@ function ProjectWorkspace({ currentUser, onLogout }) {
           if (result.file_b64) setGlbBase64(result.file_b64);
           await refreshHistory(pid);
 
-          const attemptNote =
-            result.attempts > 1 ? ` (${result.attempts} attempts)` : "";
           setMessages((prev) => [
             ...prev,
-            makeMessage("assistant", `Done.${attemptNote}`),
+            makeMessage("assistant", "Done.", { meta: formatGenerateMeta(result) }),
           ]);
         } else {
           setMessages((prev) => [
@@ -387,7 +407,7 @@ function ProjectWorkspace({ currentUser, onLogout }) {
               `Couldn't produce a valid part: ${
                 result.error ?? "unknown error"
               }`,
-              { isError: true },
+              { isError: true, meta: formatGenerateMeta(result) },
             ),
           ]);
         }
@@ -466,7 +486,9 @@ function ProjectWorkspace({ currentUser, onLogout }) {
   // Structured-editing fallback (Phase 2 item 4). Deliberately does NOT
   // catch errors here -- FeatureTreePanel's per-item edit form needs the
   // rejection to propagate so it can show the error inline next to the
-  // field being edited, rather than only in the chat log.
+  // field being edited, rather than only in the chat log. No elapsed/
+  // token meta here -- this path never calls the LLM (see
+  // llm-service/app/main.py's project_apply_edit docstring).
   const handleApplyEdit = useCallback(
     async (newJsonIr) => {
       if (!projectId) throw new Error("no active project");
