@@ -114,16 +114,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
           scene.remove(currentModelRef.current);
         }
 
-        const model = gltf.scene;
-        // build123d/OCCT's export_gltf() writes native Z-up coordinates --
-        // it has no up-axis/coordinate-system option, so the glTF's Y axis
-        // is NOT "up" the way the glTF spec normally implies. This
-        // viewport (grid, AxesHelper, camera framing) is Y-up, matching
-        // three.js convention, so the loaded model is rotated here to
-        // bring build123d's Z-up into this scene's Y-up. Must happen
-        // before the bounding-box/camera-framing code below, since that
-        // reads the model's transformed (post-rotation) extents.
-        model.rotation.x = -Math.PI / 2;
+        const model = gltf.scene;        
         applyRenderMode(model, renderMode);
 
         const box = new THREE.Box3().setFromObject(model);
