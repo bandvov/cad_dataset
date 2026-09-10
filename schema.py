@@ -360,13 +360,19 @@ def validate_ir(ir: dict) -> None:
                     raise SchemaError(
                         f"{ftype} '{fid}' selector.tolerance must be a positive number"
                     )
-            elif filter_by in SELECTOR_AXES or filter_by == "GeomType" or filter_by in (None, "all"):
-                if sel.get("criterion") not in SELECTOR_CRITERIA:
-                    raise SchemaError(f"{ftype} '{fid}' selector.criterion invalid")
-                if filter_by == "GeomType" and "geom_type" not in sel:
+            elif filter_by == "GeomType":
+                # compiler._resolve_selector's GeomType branch never reads
+                # 'criterion' (nothing to group_by) -- don't require it
+                # here either, or a selector the compiler accepts fails
+                # schema validation before build123d ever runs.
+                if "geom_type" not in sel:
                     raise SchemaError(
                         f"{ftype} '{fid}' selector.filter_by=GeomType requires 'geom_type'"
                     )
+            elif filter_by in SELECTOR_AXES or filter_by in (None, "all"):
+                if sel.get("criterion") not in SELECTOR_CRITERIA:
+                    raise SchemaError(
+                        f"{ftype} '{fid}' selector.criterion invalid")
             else:
                 raise SchemaError(
                     f"{ftype} '{fid}' selector.filter_by unrecognized: {filter_by!r} "
