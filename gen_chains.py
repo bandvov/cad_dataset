@@ -6,20 +6,21 @@ running PartState (base width/height/thickness and whatever the previous
 steps changed), not an independent random draw. Randomness only decides
 (a) which step types appear and in what order, and (b) a handful of
 discrete choices (pattern counts, through vs. blind hole, which axis/side
-a fillet or chamfer selector targets, and -- as of this version -- which
-existing hole a hole-rim fillet targets and whether it targets one or
-both rims).
+a fillet or chamfer selector targets, which existing hole a hole-rim
+fillet targets and whether it targets one or both rims, and -- as of this
+version -- which single edge of the base block an edge_fillet/
+edge_chamfer step targets).
 
 That discrete "recipe" (step sequence + discrete choices + base dims) is
 stored alongside the record. gen_regenerate.py replays the exact same
 formulas with one changed input, so every dependent value in the tree is
 recomputed consistently rather than left stale -- see README.md.
 
-NOTE ON THE "hole_fillet" STEP (added): this is the training-data side of
-the near_point selector added to schema.py/compiler.py (see those
-modules' docstrings for the motivation -- axis/GeomType selectors can't
-isolate one hole's rim edge). A hole_fillet step always targets a hole
-placed by an EARLIER "hole" step in the same recipe (tracked via
+NOTE ON THE "hole_fillet" STEP: this is the training-data side of the
+near_point selector added to schema.py/compiler.py (see those modules'
+docstrings for the motivation -- axis/GeomType selectors can't isolate a
+single hole's rim edge). A hole_fillet step always targets a hole placed
+by an EARLIER "hole" step in the same recipe (tracked via
 PartState.holes, populated by apply_hole) -- sample_recipe enforces this
 by excluding "hole_fillet" from the step pool until at least one "hole"
 step has already been chosen. The recipe stores which hole ordinally
@@ -35,6 +36,35 @@ selector plus re-checking the hole's through/blind state at apply time
 (since gen_regenerate.py's `_edit_hole_kind` can flip it after the recipe
 was first sampled), which is more selector surface than this step needs
 to cover right now.
+
+NOTE ON THE "edge_fillet" / "edge_chamfer" STEPS (added): these are the
+other near_point training-data producer -- unlike hole_fillet (which
+isolates a hole's rim), these isolate a single edge of the *base block*
+itself, e.g. "round just this one vertical corner" rather than
+apply_fillet's axis/criterion selector, which always grabs an entire side
+(all 4 top edges, say). The target point is recomputed from
+state.w/h/t at build_from_recipe() time -- not baked in as a literal --
+so a regenerate-replayed base resize moves the selector's target
+correctly along with it, same discipline every other apply_* here
+follows.
+
+GATING (added): edge_fillet/edge_chamfer are only offered while the base
+block's silhouette is still exactly the original Sketch->Extrude
+rectangle -- i.e. before any "boss" or "shell" step has run. A boss
+changes the top face's outline (no longer a plain WxH rectangle at
+top_z), and a shell changes wall thickness/offsets the whole solid, both
+of which can move the real edge geometry away from the point this step
+computes from state.w/h/t, causing the near_point selector to miss and
+the record to get quarantined by build_dataset.py's real-execution
+verification. Quarantine is not a correctness bug (a bad record is
+simply dropped, per this module's stated philosophy of only keeping
+real, execution-verified pairs) but it wastes generation/verification
+work for a low yield. sample_recipe tracks whether a boss/shell step has
+already been chosen and excludes edge_fillet/edge_chamfer from the pool
+once one has -- the same "exclude while some precondition isn't met yet"
+pattern already used to gate hole_fillet on an existing hole, just
+running in the other direction (gate is dropped going forward, not
+becoming available going forward).
 
 Run standalone: python gen_chains.py --n 500 --out out/chains.jsonl
 """
@@ -143,6 +173,78 @@ def apply_hole_fillet(state: PartState, idgen: IdGen, features: list, params: di
     return f"round the rim of that hole with a {radius}mm fillet"
 
 
+def _edge_target_point(state: PartState, params: dict) -> tuple[list, float, str]:
+    """Shared geometry for apply_edge_fillet/apply_edge_chamfer: computes
+    the near_point selector's target (point, adjacent-edge-length,
+    human-readable side description) for one of the base block's 12
+    edges, purely as a formula of state.w/h/t + the discrete params
+    sample_recipe chose. Only valid while the block's silhouette is still
+    the plain original rectangle -- see the "GATING" note in this
+    module's docstring for why sample_recipe stops offering these two
+    step types once a boss/shell has run."""
+    w, h, t = state.w, state.h, state.t
+    kind = params["edge_kind"]
+
+    if kind == "vertical":
+        sx, sy = params["sx"], params["sy"]
+        point = [sx * w / 2, sy * h / 2, t / 2]
+        edge_len = t
+        desc = f"the {'back' if sy > 0 else 'front'}-{'right' if sx > 0 else 'left'} vertical edge"
+    else:  # "horizontal"
+        sz = params["sz"]        # 0 = bottom rim, 1 = top rim
+        along = params["along"]  # which axis the edge runs parallel to
+        if along == "x":
+            sy = params["s2"]
+            point = [0, sy * h / 2, sz * t]
+            edge_len = w
+            desc = f"the {'top' if sz else 'bottom'} {'back' if sy > 0 else 'front'} edge"
+        else:
+            sx = params["s2"]
+            point = [sx * w / 2, 0, sz * t]
+            edge_len = h
+            desc = f"the {'top' if sz else 'bottom'} {'right' if sx > 0 else 'left'} edge"
+
+    return point, edge_len, desc
+
+
+def apply_edge_fillet(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
+    """Fillets exactly ONE edge of the base block via the near_point
+    selector -- unlike apply_fillet's axis/criterion selector (which
+    always grabs every edge on one side, e.g. all 4 top edges), this
+    isolates a single edge by its known midpoint, the same technique
+    apply_hole_fillet already uses for a hole's rim. See this module's
+    docstring for why sample_recipe only offers this step before any
+    boss/shell has run."""
+    point, edge_len, desc = _edge_target_point(state, params)
+    radius = max(0.2, round(min(state.min_edge, edge_len) * 0.12, 2))
+    tolerance = round(max(0.1, min(state.w, state.h, state.t) * 0.03), 2)
+
+    features.append({
+        "id": idgen.next("fillet"), "feature_type": "Fillet",
+        "selector": {"of": "edges", "filter_by": "near_point",
+                     "point": point, "tolerance": tolerance},
+        "radius": radius,
+    })
+    return f"round just {desc} with a {radius}mm fillet"
+
+
+def apply_edge_chamfer(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
+    """Same as apply_edge_fillet but Chamfer/`length` -- see that
+    function's docstring and this module's "GATING" docstring note for
+    the selector/geometry reasoning."""
+    point, edge_len, desc = _edge_target_point(state, params)
+    length = max(0.2, round(min(state.min_edge, edge_len) * 0.12, 2))
+    tolerance = round(max(0.1, min(state.w, state.h, state.t) * 0.03), 2)
+
+    features.append({
+        "id": idgen.next("chamfer"), "feature_type": "Chamfer",
+        "selector": {"of": "edges", "filter_by": "near_point",
+                     "point": point, "tolerance": tolerance},
+        "length": length,
+    })
+    return f"chamfer just {desc} by {length}mm"
+
+
 def apply_shell(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
     thickness = round(min(max(state.min_edge * 0.2, 1.0), 6.0, state.min_edge * 0.3), 2)
     features.append({
@@ -194,21 +296,33 @@ STEP_REGISTRY = {
     "chamfer": apply_chamfer,
     "hole": apply_hole,
     "hole_fillet": apply_hole_fillet,
+    "edge_fillet": apply_edge_fillet,
+    "edge_chamfer": apply_edge_chamfer,
     "shell": apply_shell,
     "linear_pattern": apply_linear_pattern,
     "circular_pattern": apply_circular_pattern,
     "boss": apply_boss,
 }
 STEP_WEIGHTS = {
-    "fillet": 1.0, "chamfer": 0.8, "hole": 1.2, "hole_fillet": 0.7, "shell": 0.5,
+    "fillet": 1.0, "chamfer": 0.8, "hole": 1.2, "hole_fillet": 0.7,
+    "edge_fillet": 0.7, "edge_chamfer": 0.6,
+    "shell": 0.5,
     "linear_pattern": 0.6, "circular_pattern": 0.5, "boss": 0.9,
 }
+# Step names that change the base block's silhouette (a boss adds a
+# raised sub-feature to the top face, a shell hollows/offsets the whole
+# solid) -- once either has run, edge_fillet/edge_chamfer's real edge
+# geometry can drift away from the point _edge_target_point() computes
+# from state.w/h/t alone. See module docstring's "GATING" note.
+SILHOUETTE_CHANGING_STEPS = {"boss", "shell"}
+EDGE_TARGETING_STEPS = {"edge_fillet", "edge_chamfer"}
 
 
 def sample_recipe(rng: random.Random, n_extra: int) -> dict:
     """The discrete part of the design: step order + any params that
     aren't a pure formula of state (counts, through/blind, fillet/chamfer
-    axis+criterion, and which hole a hole_fillet step targets)."""
+    axis+criterion, which hole a hole_fillet step targets, and which edge
+    an edge_fillet/edge_chamfer step targets)."""
     w, h = rnd("med_dim", rng), rnd("med_dim", rng)
     t = rnd("extrude_med", rng)
     names = list(STEP_REGISTRY.keys())
@@ -220,6 +334,11 @@ def sample_recipe(rng: random.Random, n_extra: int) -> dict:
     # via apply_hole) and can decide whether "both_rims" is even a
     # sensible request to make at sample time.
     hole_through_flags: list[bool] = []
+    # See module docstring's "GATING" note: once a boss/shell step has
+    # been chosen, edge_fillet/edge_chamfer are dropped from the pool for
+    # the rest of this recipe -- their near_point target assumes the
+    # block's silhouette is still the plain original rectangle.
+    silhouette_changed = False
     for _ in range(n_extra):
         # avoid the same step repeating back-to-back on the same selector
         # (e.g. chamfering the already-chamfered bottom edge again) -- low
@@ -228,15 +347,31 @@ def sample_recipe(rng: random.Random, n_extra: int) -> dict:
         # hole_fillet has nothing to target until at least one hole exists
         if not hole_through_flags:
             pool_names = [n for n in pool_names if n != "hole_fillet"]
+        # edge_fillet/edge_chamfer target the base block's original
+        # silhouette -- stop offering them once that silhouette has
+        # actually changed
+        if silhouette_changed:
+            pool_names = [n for n in pool_names if n not in EDGE_TARGETING_STEPS]
         pool_weights = [STEP_WEIGHTS[n] for n in pool_names]
         name = rng.choices(pool_names, weights=pool_weights, k=1)[0]
         last_name = name
+        if name in SILHOUETTE_CHANGING_STEPS:
+            silhouette_changed = True
         params = {}
         if name == "hole":
             params["through"] = rng.random() < 0.6
             hole_through_flags.append(params["through"])
         elif name == "hole_fillet":
             params["hole_ordinal"] = rng.randint(1, len(hole_through_flags))
+        elif name in ("edge_fillet", "edge_chamfer"):
+            params["edge_kind"] = rng.choice(["vertical", "horizontal"])
+            if params["edge_kind"] == "vertical":
+                params["sx"] = rng.choice([-1, 1])
+                params["sy"] = rng.choice([-1, 1])
+            else:
+                params["sz"] = rng.choice([0, 1])
+                params["along"] = rng.choice(["x", "y"])
+                params["s2"] = rng.choice([-1, 1])
         elif name in ("linear_pattern",):
             params["count"] = rng.randint(2, 5)
         elif name == "circular_pattern":
