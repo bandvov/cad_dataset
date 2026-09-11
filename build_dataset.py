@@ -32,6 +32,7 @@ import gen_chains
 import gen_regenerate
 import gen_repair
 from executor import BatchExecutor
+import chat_format
 
 
 def verify_records(records: list[dict], be: BatchExecutor | None, skip: bool,
@@ -52,13 +53,13 @@ def verify_records(records: list[dict], be: BatchExecutor | None, skip: bool,
         else:
             rec["verified"] = False
             rec["verification_error"] = {"error_type": result.get("error_type"),
-                                          "error": result.get("error")}
+                                        "error": result.get("error")}
             quarantined.append(rec)
         if not skip and ((i + 1) % 20 == 0 or i + 1 == n):
             elapsed = time.time() - start
             rate = (i + 1) / elapsed if elapsed > 0 else 0
             print(f"   [{label}] {i + 1}/{n}  ({rate:.1f} rec/s, {elapsed:.0f}s elapsed)",
-                  flush=True)
+                flush=True)
     return verified, quarantined
 
 
@@ -75,30 +76,24 @@ def to_chat_format(rec: dict) -> dict:
     """Renders one dataset record as a TRL "conversational prompt-completion"
     example: {"prompt": [...], "completion": [...]}, each a list of chat
     messages. This is the format current trl's completion_only_loss=True
-    expects (trl removed DataCollatorForCompletionOnlyLM; the replacement
-    needs prompt/completion as separate columns, not a single merged
-    messages list with a response-template string to search for -- see
-    training/README.md). Repair/regenerate tasks fold their extra context
-    into the prompt turn."""
+    expects (see training/README.md). Repair/regenerate tasks fold their
+    extra context into the prompt turn via chat_format.py -- the SAME
+    module orchestrator.py uses at serving time, so the wording here can
+    never drift from what inference actually sends the model."""
     task = rec["task_type"]
     if task == "generate":
-        user = rec["instruction"]
-        model_out = json.dumps(rec["json_ir"])
+        user = chat_format.render_generate_user_turn(rec["instruction"])
     elif task == "repair":
-        user = (
-            f"{rec['instruction']}\n\n"
-            f"Broken feature tree:\n{json.dumps(rec['broken_ir'])}\n\n"
-            f"Error: {rec['error']}"
+        user = chat_format.render_repair_user_turn(
+            broken_ir=rec["broken_ir"], error=rec["error"], instruction=rec["instruction"]
         )
-        model_out = json.dumps(rec["json_ir"])
     elif task == "regenerate":
-        user = (
-            f"Here is the current part:\n{json.dumps(rec['base_ir'])}\n\n"
-            f"{rec['instruction']}"
-        )
-        model_out = json.dumps(rec["json_ir"])
+        user = chat_format.render_regenerate_user_turn(
+            rec["base_ir"], rec["instruction"])
     else:
         raise ValueError(f"unknown task_type {task}")
+
+    model_out = json.dumps(rec["json_ir"])
 
     return {
         "record_id": rec["record_id"],
@@ -126,13 +121,13 @@ def main():
     ap.add_argument("--out-dir", default="out")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--skip-verification", action="store_true",
-                     help="don't execute build123d -- plumbing-only test run")
+                    help="don't execute build123d -- plumbing-only test run")
     ap.add_argument("--include-flywheel-data", nargs="+", default=[],
-                     help="Phase 4 step 8: path(s) to verified flywheel records "
-                          "(mine_flywheel_verify.py / mine_flywheel_dedup.py output) "
-                          "to merge into the same dedup+split+chat-format pipeline as "
-                          "synthetic data. Records without verified=true are dropped "
-                          "with a warning, never trusted just because the file claims it.")
+                    help="Phase 4 step 8: path(s) to verified flywheel records "
+                    "(mine_flywheel_verify.py / mine_flywheel_dedup.py output) "
+                    "to merge into the same dedup+split+chat-format pipeline as "
+                    "synthetic data. Records without verified=true are dropped "
+                    "with a warning, never trusted just because the file claims it.")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -144,7 +139,8 @@ def main():
     chains = gen_chains.generate(args.n_chains, seed=args.seed)
     print(f"   {len(chains)} candidates generated", flush=True)
 
-    be = None if args.skip_verification else BatchExecutor(timeout_per_item=args.timeout)
+    be = None if args.skip_verification else BatchExecutor(
+        timeout_per_item=args.timeout)
     try:
         print("== verifying single-feature records "
               "(first batch pays a one-time build123d import cost, ~seconds) ==", flush=True)
@@ -165,7 +161,7 @@ def main():
         if not args.skip_verification:
             print("== generating + verifying repair records ==", flush=True)
             rng = random.Random(args.seed)
-            execute_fn = lambda ir, timeout=None: be.execute(ir)  # noqa: E731
+            def execute_fn(ir, timeout=None): return be.execute(ir)  # noqa: E731
             pool_copy = list(generate_pool)
             rng.shuffle(pool_copy)
             for i, rec in enumerate(pool_copy):
