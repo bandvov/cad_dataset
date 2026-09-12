@@ -128,6 +128,39 @@ def fault_undefined_reference(ir: dict, rng: random.Random):
     return broken, f"changed source reference from '{old}' to '{target['source']}' (id does not exist)"
 
 
+def fault_wrong_shell_selector_key(ir: dict, rng: random.Random):
+    """Renames a Shell feature's `open_selector` field to `selector` --
+    the exact wrong key name production usage showed a model reaching for
+    (see SESSION_HANDOFF.md-adjacent discussion): Fillet and Chamfer both
+    require a field literally named `selector` with the identical
+    {of, filter_by, criterion} shape, and Shell is the only other feature
+    type with a selector-shaped field, just under a different name
+    (`open_selector`, since it's optional and describes an *opening* face,
+    not a target to modify). A model that's seen `selector` far more often
+    (every Fillet/Chamfer example) than `open_selector` (Shell only, and
+    only the fraction of Shell examples that had an opening at all) can
+    plausibly over-generalize the more frequent name onto Shell.
+
+    Before schema.py's unrecognized-field check, this produced NO error
+    at all -- compiler._do_shell only reads `open_selector` if present, so
+    a Shell with `selector` instead just silently built with openings=None
+    (a fully closed shell), which is valid, non-degenerate geometry. This
+    fault type exists specifically because that failure mode was
+    previously invisible to the repair loop; it only became detectable
+    (and therefore trainable) once schema.validate_ir() started rejecting
+    unrecognized per-feature fields."""
+    shells = _find_features(ir, "Shell")
+    shells_with_opening = [f for f in shells if "open_selector" in f]
+    if not shells_with_opening:
+        return None
+    broken = copy.deepcopy(ir)
+    broken_shells = [f for f in _find_features(broken, "Shell") if "open_selector" in f]
+    target = rng.choice(broken_shells)
+    value = target.pop("open_selector")
+    target["selector"] = value
+    return broken, "renamed Shell's 'open_selector' field to 'selector' (Shell has no 'selector' field -- did you mean 'open_selector'?)"
+
+
 FAULT_TYPES = [
     fault_oversize_fillet,
     fault_oversize_chamfer,
@@ -135,6 +168,7 @@ FAULT_TYPES = [
     fault_negative_hole_depth,
     fault_zero_match_selector,
     fault_undefined_reference,
+    fault_wrong_shell_selector_key,
 ]
 
 

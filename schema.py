@@ -1,55 +1,13 @@
-"""
-schema.py
-Single source of truth for the JSON IR feature-tree format used across the
-compiler and every data generator. Keeping this in one place means the
-compiler and generators can never silently drift apart on field names.
-
-IR shape:
-{
-  "features": [ {feature}, {feature}, ... ]
-}
-
-Every feature has: "id" (unique str) and "feature_type" (one of FEATURE_TYPES).
-See FEATURE_SPECS below for required/optional fields per type.
-
-NOTE ON THE (removed) ROOT "operation" FIELD: earlier versions of this
-schema required a root {"operation": "part", "features": [...]} shape.
-That field was dropped -- it never varied (there was only ever one kind
-of document), nothing past validate_ir() ever read it, and it turned out
-to be the single most common thing a fine-tuned model got wrong (emitting
-the value as the key instead of the key itself: {"part": "part"}). A
-root-level type discriminator only earns its keep when two possible
-document shapes could be structurally ambiguous; a future assembly format
-(see root README.md's "Known limitations") would have its own "bodies"
-key at the root with each body's own nested "features" list, which is
-already unambiguous against this shape without any extra tag. validate_ir()
-below silently ignores an "operation" key if one is still present (old
-generated data, old stored project versions), so nothing needs migrating.
-
-NOTE ON THE "near_point" SELECTOR (added): filter_by X/Y/Z + criterion
-max/min and filter_by GeomType/CIRCLE can't isolate a single hole's rim
-edge -- axis-based grouping can't express "the edge around this specific
-hole," and GeomType: CIRCLE matches every circular edge in the part (OCCT
-classifies all arcs as CIRCLE regardless of subtended angle, so other
-holes AND rounded corners get swept in too). near_point matches
-edges/faces whose bounding-box center is within `tolerance` of `point`,
-reusing the position a Hole feature already records in its `location`.
-Any coordinate in `point` may be `null` to mean "don't constrain this
-axis" -- this is what lets one selector match BOTH rim edges of a
-through-hole (null out Z) instead of only the one at a specific depth.
-"""
-
 from __future__ import annotations
+import difflib
 from typing import Any
 
 
 SKETCH_PRIMITIVE_TYPES = {
-    # closed 2D regions (combined into a Sketch via boolean "mode")
     "Rectangle": {"required": ["width", "height"], "optional": ["position", "rotation", "mode"]},
     "Circle": {"required": ["radius"], "optional": ["position", "mode"]},
     "Polygon": {"required": ["points"], "optional": ["position", "rotation", "mode"]},
     "Slot": {"required": ["width", "height"], "optional": ["position", "rotation", "mode"]},
-    # open wires (used as Sweep paths / construction geometry, no "mode")
     "Line": {"required": ["points"], "optional": []},
     "Spline": {"required": ["points"], "optional": []},
     "Polyline": {"required": ["points"], "optional": []},
@@ -58,77 +16,36 @@ SKETCH_PRIMITIVE_TYPES = {
 WIRE_PRIMITIVE_TYPES = {"Line", "Spline", "Polyline"}
 
 FEATURE_TYPES = {
-    "Sketch": {
-        "required": ["primitives"],
-        "optional": ["plane"],
-    },
-    "Extrude": {
-        "required": ["source", "amount"],
-        "optional": ["both", "taper", "operation"],
-    },
-    "Revolve": {
-        "required": ["source"],
-        "optional": ["axis", "angle", "operation"],
-    },
-    "Loft": {
-        "required": ["sources"],
-        "optional": ["ruled", "operation"],
-    },
-    "Sweep": {
-        "required": ["profile", "path"],
-        "optional": ["is_frenet", "operation"],
-    },
-    "Fillet": {
-        "required": ["selector", "radius"],
-        "optional": ["target"],
-    },
-    "Chamfer": {
-        "required": ["selector", "length"],
-        "optional": ["target", "length2", "angle"],
-    },
-    "Shell": {
-        "required": ["thickness"],
-        "optional": ["target", "open_selector"],
-    },
-    "Hole": {
-        "required": ["style", "radius", "depth", "location"],
-        "optional": ["target", "cb_radius", "cb_depth", "cs_angle"],
-    },
-    "Mirror": {
-        "required": ["plane"],
-        "optional": ["target", "operation"],
-    },
-    "LinearPattern": {
-        "required": ["direction", "count", "spacing"],
-        "optional": ["target", "operation"],
-    },
-    "CircularPattern": {
-        "required": ["axis", "count", "angle"],
-        "optional": ["target", "operation"],
-    },
+    "Sketch": {"required": ["primitives"], "optional": ["plane"]},
+    "Extrude": {"required": ["source", "amount"], "optional": ["both", "taper", "operation"]},
+    "Revolve": {"required": ["source"], "optional": ["axis", "angle", "operation"]},
+    "Loft": {"required": ["sources"], "optional": ["ruled", "operation"]},
+    "Sweep": {"required": ["profile", "path"], "optional": ["is_frenet", "operation"]},
+    "Fillet": {"required": ["selector", "radius"], "optional": ["target"]},
+    "Chamfer": {"required": ["selector", "length"], "optional": ["target", "length2", "angle"]},
+    "Shell": {"required": ["thickness"], "optional": ["target", "open_selector"]},
+    "Hole": {"required": ["style", "radius", "depth", "location"],
+             "optional": ["target", "cb_radius", "cb_depth", "cs_angle"]},
+    "Mirror": {"required": ["plane"], "optional": ["target", "operation"]},
+    "LinearPattern": {"required": ["direction", "count", "spacing"], "optional": ["target", "operation"]},
+    "CircularPattern": {"required": ["axis", "count", "angle"], "optional": ["target", "operation"]},
 }
 
-# Feature types that consume/produce full solid geometry and combine into
-# the running part via a boolean "operation" (default ADD if omitted).
-# NOTE: this is a PER-FEATURE field (Extrude.operation, Mirror.operation,
-# etc. -- ADD/SUBTRACT/INTERSECT), unrelated to the removed root-level
-# "operation" field discussed in the module docstring above. Same key
-# name, different level, different meaning -- don't conflate them.
 SOLID_PRODUCING = {
     "Extrude", "Revolve", "Loft", "Sweep", "Mirror", "LinearPattern", "CircularPattern",
 }
-# Feature types that mutate the current solid in place (no separate operand).
 SOLID_MODIFYING = {"Fillet", "Chamfer", "Shell", "Hole"}
 
 BOOLEAN_OPS = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
 SKETCH_MODES = {"ADD", "SUBTRACT", "INTERSECT", "CUT"}
 SELECTOR_AXES = {"X", "Y", "Z"}
 SELECTOR_CRITERIA = {"max", "min", "all"}
-# filter_by values recognized by _resolve_selector, beyond the bare axis
-# names in SELECTOR_AXES -- kept as its own set so validate_ir can check
-# selector.filter_by without hardcoding the axis/non-axis distinction
-# twice.
 SELECTOR_FILTER_KINDS = {"GeomType", "near_point"}
+
+# Always allowed on every feature regardless of type, alongside each
+# type's own required/optional fields (see the unknown-field check in
+# validate_ir()).
+_ALWAYS_ALLOWED_FEATURE_KEYS = {"id", "feature_type"}
 
 
 class SchemaError(ValueError):
@@ -136,20 +53,9 @@ class SchemaError(ValueError):
 
 
 class BoundsError(ValueError):
-    """Raised for IR that's structurally well-formed but has values a real
-    request should never plausibly need -- a hallucinated pattern count of
-    50000, a 1e9mm dimension, a tree with hundreds of features. This is
-    the pre-execution sanity gate Phase 1 called for: reject fast, before
-    ever spawning a worker, rather than relying only on the per-job
-    timeout/rlimit backstop (which still burns a worker slot, and in the
-    worst case can OOM before the timeout even fires)."""
+    pass
 
 
-# Deliberately generous -- these bound "no sane request needs more than
-# this," not "this is the most a real part could ever have." Tune based on
-# production data (see the earlier product-layer discussion: log requests
-# that hit these limits, since that tells you whether the bound is too
-# tight for real usage before it tells you about a hallucination).
 BOUNDS = {
     "max_features": 60,
     "max_primitives_per_sketch": 20,
@@ -157,12 +63,10 @@ BOUNDS = {
     "max_loft_sources": 8,
     "max_pattern_count": 50,
     "min_dimension_mm": 1e-3,
-    "max_dimension_mm": 10_000.0,       # 10 meters -- generous for "a part"
+    "max_dimension_mm": 10_000.0,
     "max_fillet_or_chamfer_mm": 500.0,
-    "max_revolve_angle_deg": 360.0 * 10,  # allow a few extra wraps, not thousands
-    "max_near_point_tolerance_mm": 50.0,  # a near_point selector this loose isn't
-                                           # isolating anything -- it's a hallucinated
-                                           # "match everything" in disguise
+    "max_revolve_angle_deg": 360.0 * 10,
+    "max_near_point_tolerance_mm": 50.0,
 }
 
 
@@ -170,19 +74,14 @@ def _check_dim(value, name: str, violations: list[str], max_override: float | No
     lo = BOUNDS["min_dimension_mm"]
     hi = max_override if max_override is not None else BOUNDS["max_dimension_mm"]
     if not isinstance(value, (int, float)):
-        return  # type issues are validate_ir's job, not bounds
-    if value != value:  # NaN
+        return
+    if value != value:
         violations.append(f"{name} is NaN")
     elif value < lo or value > hi:
         violations.append(f"{name}={value} out of bounds [{lo}, {hi}]")
 
 
 def validate_bounds(ir: dict) -> list[str]:
-    """Returns a list of human-readable violation strings (empty = OK).
-    Separate from validate_ir() on purpose: structural validity and
-    resource/value sanity are different concerns, and callers (e.g.
-    build_dataset.py's own generators, which are formula-bounded and will
-    never trip these) don't need to pay for a check they can't fail."""
     violations: list[str] = []
     features = ir.get("features", [])
     if len(features) > BOUNDS["max_features"]:
@@ -255,18 +154,36 @@ def validate_bounds(ir: dict) -> list[str]:
     return violations
 
 
-def validate_ir(ir: dict) -> None:
-    """Structural validation only (field presence / id references).
-    Does NOT check geometric validity -- that requires actual execution,
-    see executor.py / validator.py.
+def _check_unknown_fields(feat: dict, fid: str, ftype: str, spec: dict) -> None:
+    """Rejects any top-level feature key that isn't 'id'/'feature_type' or
+    one of this feature type's own required/optional fields -- e.g. a
+    Shell with 'selector' instead of 'open_selector'. Before this check,
+    an unrecognized key was simply never read by compiler.py (Python
+    dicts silently ignore extra keys), so a wrong-but-plausible field
+    name compiled to valid, non-degenerate geometry with no error and no
+    repair-loop signal at all -- the mistake was invisible until a human
+    noticed the rendered part didn't look right. Runs a close-match
+    suggestion (via difflib) against this type's actual field names so
+    the resulting SchemaError message doubles as a usable repair-turn
+    hint, not just a bare rejection."""
+    allowed = _ALWAYS_ALLOWED_FEATURE_KEYS | set(spec["required"]) | set(spec["optional"])
+    unknown = set(feat.keys()) - allowed
+    if not unknown:
+        return
+    candidates = sorted(allowed - _ALWAYS_ALLOWED_FEATURE_KEYS)
+    parts = []
+    for key in sorted(unknown):
+        suggestion = difflib.get_close_matches(key, candidates, n=1, cutoff=0.6)
+        if suggestion:
+            parts.append(f"'{key}' (did you mean '{suggestion[0]}'?)")
+        else:
+            parts.append(f"'{key}'")
+    raise SchemaError(
+        f"feature '{fid}' ({ftype}) has unrecognized field(s): {', '.join(parts)}"
+    )
 
-    Root shape is just {"features": [...]} -- see the module docstring
-    for why the old root "operation": "part" requirement was dropped.
-    Any extra/legacy top-level keys (including an old "operation" or a
-    model's malformed "part") are simply never inspected here, so old
-    stored/generated data with the old key still validates fine without
-    a migration.
-    """
+
+def validate_ir(ir: dict) -> None:
     features = ir.get("features")
     if not isinstance(features, list) or not features:
         raise SchemaError("'features' must be a non-empty list")
@@ -288,7 +205,8 @@ def validate_ir(ir: dict) -> None:
             if req not in feat:
                 raise SchemaError(f"feature '{fid}' ({ftype}) missing required field '{req}'")
 
-        # reference checks: any field naming a prior feature id must exist earlier in the list
+        _check_unknown_fields(feat, fid, ftype, spec)
+
         ref_fields = []
         if ftype == "Extrude":
             ref_fields = ["source"]
@@ -335,10 +253,6 @@ def validate_ir(ir: dict) -> None:
 
             filter_by = sel.get("filter_by")
             if filter_by == "near_point":
-                # near_point is its own validated shape -- criterion
-                # doesn't apply to it (there's nothing to group_by), so
-                # it's deliberately NOT run through the SELECTOR_CRITERIA
-                # check below.
                 point = sel.get("point")
                 if not isinstance(point, (list, tuple)) or len(point) != 3:
                     raise SchemaError(
@@ -361,10 +275,6 @@ def validate_ir(ir: dict) -> None:
                         f"{ftype} '{fid}' selector.tolerance must be a positive number"
                     )
             elif filter_by == "GeomType":
-                # compiler._resolve_selector's GeomType branch never reads
-                # 'criterion' (nothing to group_by) -- don't require it
-                # here either, or a selector the compiler accepts fails
-                # schema validation before build123d ever runs.
                 if "geom_type" not in sel:
                     raise SchemaError(
                         f"{ftype} '{fid}' selector.filter_by=GeomType requires 'geom_type'"
