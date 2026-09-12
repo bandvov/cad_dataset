@@ -26,6 +26,29 @@ Edge/Face/Solid alike in build123d) rather than a per-entity `.center()`,
 since `.center()`'s availability/semantics vary more across entity types
 -- confirm this still gets you what you want on your installed version
 before trusting it for anything beyond a quick check.
+
+NOTE ON PART.LABEL TAGGING (added): every solid-producing/modifying
+feature now tags its output with `.label = feature_id` via `_label()`
+below, intended to survive into STEP's XCAF product names / glTF node
+names on export so the frontend can resolve a rendered mesh back to the
+feature that produced it (see frontend/src/lib/featureHighlight.js).
+IMPORTANT LIMITATION: `_combine()`'s boolean folds (`+`/`-`/`&`) produce
+a NEW OCCT shape and do not carry either operand's `.label` onto the
+result -- so a label set here only survives for the object at the exact
+moment it's created. In practice this means: (a) `current_part` at any
+point in time carries the label of whichever feature MOST RECENTLY
+replaced it wholesale (any Fillet/Chamfer/Shell/Hole, since those already
+reassign `self.current_part` directly rather than folding via
+`_combine()`), and (b) a solid-producing feature's own label (Extrude,
+Revolve, etc.) is only visible if nothing has folded it into a running
+part yet, or if it's the very first ADD (where `_combine()` sets
+`current_part = new_solid` directly, no fold). Earlier features that get
+boolean-folded into a later one lose their label at that point -- this
+is the same "geometry identity lost at boolean fold" limitation already
+tracked for hover/feature-ID highlighting; the JSON-sidecar or
+OCCT-history approaches are what actually solve full lineage. This
+tagging is a real, if partial, step: it gets the common single-modifier
+case (the whole point of most Fillet/Chamfer/Shell/Hole use) right today.
 """
 
 from __future__ import annotations
@@ -49,22 +72,6 @@ class IRCompiler:
         self.bd = bd            # imported even where build123d isn't installed
         self.registry: dict[str, Any] = {}   # feature id -> compiled object
         self.current_part: Any = None        # running Part (bd.Part / bd.Solid)
-
-    def _label(self, shape, fid: str):
-        """Tags a compiled solid with its originating feature id via
-        build123d's Shape.label (carried into STEP's XCAF product names /
-        glTF node names on export). Best-effort -- not every compiled object
-        exposes .label (e.g. a bare Wire from a sweep-path Sketch), and OCCT
-        booleans don't propagate a label onto a fused result, so this only
-        gives real lineage for the object at the moment it's created, not
-        after a later ADD/SUBTRACT folds it into current_part. See
-        _combine()'s docstring / the feature-ID investigation for the actual
-        fix (OCCT history or a JSON sidecar)."""
-        try:
-            shape.label = fid
-        except Exception:  # noqa: BLE001
-            pass
-        return shape
 
     # ------------------------------------------------------------------ #
     # public entry point
@@ -113,6 +120,22 @@ class IRCompiler:
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
+    def _label(self, shape, fid: str):
+        """Tags a compiled solid with its originating feature id via
+        build123d's Shape.label (intended to carry into STEP's XCAF
+        product names / glTF node names on export). Best-effort -- not
+        every compiled object exposes a settable .label (e.g. a bare
+        Wire from a sweep-path Sketch), and this is deliberately silent
+        on failure rather than raising, since a missing label should
+        never break compilation. See this module's docstring ("NOTE ON
+        PART.LABEL TAGGING") for what this can and can't guarantee once
+        boolean folding is involved."""
+        try:
+            shape.label = fid
+        except Exception:  # noqa: BLE001
+            pass
+        return shape
+
     def _plane(self, plane_spec: dict | None):
         bd = self.bd
         if not plane_spec:
@@ -296,7 +319,6 @@ class IRCompiler:
         for i in range(1, count):
             offset = bd.Pos(dx * spacing * i, dy * spacing * i, dz * spacing * i)
             copies = copies + (offset * target)
-        self._label(copies, feat["id"])
         return self._merge_pattern(target, copies, feat)
 
     def _merge_pattern(self, target, pattern_result, feat):
@@ -305,6 +327,7 @@ class IRCompiler:
         # unioned into self.current_part, only fold in the *additional*
         # copies to avoid double-unioning the base instance.
         extra = pattern_result - target
+        self._label(extra, feat["id"])
         return self._combine(extra, feat.get("operation", "ADD"))
 
     def _rotate_copy(self, shape, origin, direction, angle_deg):
@@ -412,6 +435,7 @@ class IRCompiler:
         target = self._resolve_target(feat)
         entities = self._resolve_selector(target, feat["selector"])
         result = bd.fillet(entities, radius=feat["radius"])
+        self._label(result, feat["id"])
         self.current_part = result
         return result
 
@@ -425,6 +449,7 @@ class IRCompiler:
         if "angle" in feat:
             kwargs["angle"] = feat["angle"]
         result = bd.chamfer(entities, **kwargs)
+        self._label(result, feat["id"])
         self.current_part = result
         return result
 
@@ -441,6 +466,7 @@ class IRCompiler:
             # default Kind.ARC can fail on sharp rectilinear corners;
             # Kind.INTERSECTION (square corners) is the documented fallback
             result = bd.offset(target, amount=amount, openings=openings, kind=bd.Kind.INTERSECTION)
+        self._label(result, feat["id"])
         self.current_part = result
         return result
 
@@ -477,6 +503,7 @@ class IRCompiler:
             raise CompileError(f"unsupported hole style '{style}'")
 
         result = target - cutter
+        self._label(result, feat["id"])
         self.current_part = result
         return result
 
