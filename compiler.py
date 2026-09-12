@@ -50,6 +50,22 @@ class IRCompiler:
         self.registry: dict[str, Any] = {}   # feature id -> compiled object
         self.current_part: Any = None        # running Part (bd.Part / bd.Solid)
 
+    def _label(self, shape, fid: str):
+        """Tags a compiled solid with its originating feature id via
+        build123d's Shape.label (carried into STEP's XCAF product names /
+        glTF node names on export). Best-effort -- not every compiled object
+        exposes .label (e.g. a bare Wire from a sweep-path Sketch), and OCCT
+        booleans don't propagate a label onto a fused result, so this only
+        gives real lineage for the object at the moment it's created, not
+        after a later ADD/SUBTRACT folds it into current_part. See
+        _combine()'s docstring / the feature-ID investigation for the actual
+        fix (OCCT history or a JSON sidecar)."""
+        try:
+            shape.label = fid
+        except Exception:  # noqa: BLE001
+            pass
+        return shape
+
     # ------------------------------------------------------------------ #
     # public entry point
     # ------------------------------------------------------------------ #
@@ -228,6 +244,7 @@ class IRCompiler:
         if feat.get("taper"):
             kwargs["taper"] = feat["taper"]
         solid = bd.extrude(sketch, **kwargs)
+        self._label(solid, feat["id"])
         return self._combine(solid, feat.get("operation"))
 
     def _do_revolve(self, feat: dict):
@@ -238,6 +255,7 @@ class IRCompiler:
                         tuple(axis_spec.get("direction", (0, 1, 0))))
         angle = feat.get("angle", 360)
         solid = bd.revolve(sketch, axis=axis, revolution_arc=angle)
+        self._label(solid, feat["id"])
         return self._combine(solid, feat.get("operation"))
 
     def _do_loft(self, feat: dict):
@@ -246,6 +264,7 @@ class IRCompiler:
         if len(sections) < 2:
             raise CompileError("Loft requires at least 2 source sketches")
         solid = bd.loft(sections, ruled=feat.get("ruled", False))
+        self._label(solid, feat["id"])
         return self._combine(solid, feat.get("operation"))
 
     def _do_sweep(self, feat: dict):
@@ -253,6 +272,7 @@ class IRCompiler:
         profile = self.registry[feat["profile"]]
         path = self.registry[feat["path"]]
         solid = bd.sweep(sections=profile, path=path, is_frenet=feat.get("is_frenet", False))
+        self._label(solid, feat["id"])
         return self._combine(solid, feat.get("operation"))
 
     def _do_mirror(self, feat: dict):
@@ -263,6 +283,7 @@ class IRCompiler:
         if plane is None:
             raise CompileError(f"unknown mirror plane '{plane_name}'")
         mirrored = bd.mirror(target, about=plane)
+        self._label(mirrored, feat["id"])
         return self._combine(mirrored, feat.get("operation", "ADD"))
 
     def _do_linear_pattern(self, feat: dict):
@@ -275,6 +296,7 @@ class IRCompiler:
         for i in range(1, count):
             offset = bd.Pos(dx * spacing * i, dy * spacing * i, dz * spacing * i)
             copies = copies + (offset * target)
+        self._label(copies, feat["id"])
         return self._merge_pattern(target, copies, feat)
 
     def _merge_pattern(self, target, pattern_result, feat):
