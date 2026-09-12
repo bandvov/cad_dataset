@@ -183,6 +183,66 @@ def _check_unknown_fields(feat: dict, fid: str, ftype: str, spec: dict) -> None:
     )
 
 
+def _validate_selector_shape(sel, label: str) -> None:
+    """Validates one selector dict's shape -- shared by Fillet/Chamfer's
+    required 'selector' field AND Shell's optional 'open_selector' field,
+    since both use the identical {of, filter_by, criterion} (or
+    near_point / GeomType variant) shape. `label` is a human-readable
+    prefix for error messages, e.g. "Fillet 'fillet_1' selector" or
+    "Shell 'shell_1' open_selector".
+
+    Before this helper existed, two related gaps were both live at once:
+    Shell's open_selector had NO shape validation anywhere (only its
+    presence as a recognized key was checked), and even Fillet/Chamfer's
+    selector validation assumed `sel` was already a dict and called
+    `sel.get(...)` immediately -- a non-dict selector (e.g. a bare list)
+    raised a raw AttributeError instead of a clean SchemaError, and for
+    Shell specifically that AttributeError never even fired here; it
+    surfaced three layers down as compiler.py's `selector["of"]`
+    TypeError once _resolve_selector actually ran. The isinstance check
+    below is what turns both of those into one clear, actionable error at
+    validation time instead of a raw Python exception at compile time."""
+    if not isinstance(sel, dict):
+        raise SchemaError(
+            f"{label} must be an object with 'of'/'filter_by'/'criterion' fields, "
+            f"got {type(sel).__name__}: {sel!r}"
+        )
+    if sel.get("of") not in ("edges", "faces"):
+        raise SchemaError(f"{label}.of must be 'edges' or 'faces'")
+
+    filter_by = sel.get("filter_by")
+    if filter_by == "near_point":
+        point = sel.get("point")
+        if not isinstance(point, (list, tuple)) or len(point) != 3:
+            raise SchemaError(
+                f"{label}.filter_by=near_point requires a 3-element "
+                f"'point' [x, y, z] (any coordinate may be null to leave it unconstrained)"
+            )
+        for coord in point:
+            if coord is not None and not isinstance(coord, (int, float)):
+                raise SchemaError(f"{label}.point coordinates must be numbers or null")
+        if all(c is None for c in point):
+            raise SchemaError(
+                f"{label}.point cannot have every coordinate null -- that matches "
+                f"every edge, same as filter_by=all"
+            )
+        tolerance = sel.get("tolerance", 1e-3)
+        if not isinstance(tolerance, (int, float)) or tolerance <= 0:
+            raise SchemaError(f"{label}.tolerance must be a positive number")
+    elif filter_by == "GeomType":
+        if "geom_type" not in sel:
+            raise SchemaError(f"{label}.filter_by=GeomType requires 'geom_type'")
+    elif filter_by in SELECTOR_AXES or filter_by in (None, "all"):
+        if sel.get("criterion") not in SELECTOR_CRITERIA:
+            raise SchemaError(f"{label}.criterion invalid")
+    else:
+        raise SchemaError(
+            f"{label}.filter_by unrecognized: {filter_by!r} "
+            f"(expected an axis {sorted(SELECTOR_AXES)}, {sorted(SELECTOR_FILTER_KINDS)}, "
+            f"'all', or null)"
+        )
+
+
 def validate_ir(ir: dict) -> None:
     features = ir.get("features")
     if not isinstance(features, list) or not features:
@@ -247,48 +307,10 @@ def validate_ir(ir: dict) -> None:
                         )
 
         if ftype in ("Fillet", "Chamfer"):
-            sel = feat["selector"]
-            if sel.get("of") not in ("edges", "faces"):
-                raise SchemaError(f"{ftype} '{fid}' selector.of must be 'edges' or 'faces'")
+            _validate_selector_shape(feat["selector"], f"{ftype} '{fid}' selector")
 
-            filter_by = sel.get("filter_by")
-            if filter_by == "near_point":
-                point = sel.get("point")
-                if not isinstance(point, (list, tuple)) or len(point) != 3:
-                    raise SchemaError(
-                        f"{ftype} '{fid}' selector.filter_by=near_point requires a 3-element "
-                        f"'point' [x, y, z] (any coordinate may be null to leave it unconstrained)"
-                    )
-                for coord in point:
-                    if coord is not None and not isinstance(coord, (int, float)):
-                        raise SchemaError(
-                            f"{ftype} '{fid}' selector.point coordinates must be numbers or null"
-                        )
-                if all(c is None for c in point):
-                    raise SchemaError(
-                        f"{ftype} '{fid}' selector.point cannot have every coordinate null "
-                        f"-- that matches every edge, same as filter_by=all"
-                    )
-                tolerance = sel.get("tolerance", 1e-3)
-                if not isinstance(tolerance, (int, float)) or tolerance <= 0:
-                    raise SchemaError(
-                        f"{ftype} '{fid}' selector.tolerance must be a positive number"
-                    )
-            elif filter_by == "GeomType":
-                if "geom_type" not in sel:
-                    raise SchemaError(
-                        f"{ftype} '{fid}' selector.filter_by=GeomType requires 'geom_type'"
-                    )
-            elif filter_by in SELECTOR_AXES or filter_by in (None, "all"):
-                if sel.get("criterion") not in SELECTOR_CRITERIA:
-                    raise SchemaError(
-                        f"{ftype} '{fid}' selector.criterion invalid")
-            else:
-                raise SchemaError(
-                    f"{ftype} '{fid}' selector.filter_by unrecognized: {filter_by!r} "
-                    f"(expected an axis {sorted(SELECTOR_AXES)}, {sorted(SELECTOR_FILTER_KINDS)}, "
-                    f"'all', or null)"
-                )
+        if ftype == "Shell" and "open_selector" in feat:
+            _validate_selector_shape(feat["open_selector"], f"Shell '{fid}' open_selector")
 
         op = feat.get("operation")
         if op is not None and op not in BOOLEAN_OPS:
