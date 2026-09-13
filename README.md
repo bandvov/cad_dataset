@@ -55,22 +55,42 @@ API call is wrong."
 ## Architecture
 
 ```
-schema.py            canonical IR field definitions + structural validate_ir()
-compiler.py           direct interpreter: IR -> build123d geometry, in-process
-executor.py           runs compiler.py in a timeout'd subprocess, isolated
+schema.py              canonical IR field definitions + structural validate_ir()
+compiler.py            direct interpreter: IR -> build123d geometry, in-process
+executor.py            runs compiler.py in a timeout'd subprocess, isolated
 validator.py           geometric sanity checks + stat extraction (real build123d)
 primitives.py          parameter samplers, safe ranges, instruction phrasing
+chat_format.py         shared turn rendering -- the SAME wording at training
+                       and inference, so phrasing can't drift between the
+                       dataset and what the running service sends the model
 gen_single_feature.py  one feature type per record (full FEATURE_TYPES coverage)
-gen_chains.py           2-8 feature chains built from a *replayable recipe*
-gen_repair.py            execution-verified fault injection (real error text only)
-gen_regenerate.py        replays a chain's recipe with one edited input
-build_dataset.py         orchestrates all of the above -> verify -> dedupe -> split
-mine_flywheel_data.py     Phase 4 step 1: extracts outcome-classified production
-                          events (retried/edited/abandoned) from llm-service's
-                          request log -- extraction only; pairing, re-verification,
-                          dedup, and chat-format conversion are later, not-yet-built
-                          steps in the flywheel plan (see its module docstring)
-stub_build123d/          fake build123d, PLUMBING TESTS ONLY, see warning above
+gen_chains.py          2-8 feature chains built from a *replayable recipe*
+gen_repair.py          execution-verified fault injection (real error text only)
+gen_regenerate.py      replays a chain's recipe with one edited input
+build_dataset.py       orchestrates all of the above -> verify -> dedupe -> split;
+                       --include-flywheel-data merges verified mined records
+mine_flywheel_data.py  flywheel step 1: extract outcome-classified production
+                       events (retried/edited/abandoned) from llm-service's
+                       admin log -- extraction only; pairing, re-verification,
+                       dedup, and chat-format conversion are later steps (see
+                       its module docstring)
+mine_flywheel_repairs.py  flywheel step 2: pair failed events with the
+                       eventual successful fix -> repair records (verified=false)
+mine_flywheel_pairs.py standalone variant of step 2 -- consumes step 1's
+                       filtered events JSONL (--max-lookforward-minutes)
+mine_flywheel_edits.py flywheel step 3: "edited" events paired with the manual
+                       apply that followed them -> regenerate records
+mine_flywheel_verify.py  flywheel step 4: re-run pairs through real build123d,
+                       mark verified true / quarantine drift
+mine_flywheel_dedup.py flywheel step 5: dedup vs. corpus via structure_hash
+mine_flywheel_gate.py  flywheel volume/quality gate, exit 0/1 (retraining trigger)
+mine_repair_pairs.py   earlier pre-auth repair-pair miner -- superseded by the
+                       --auth-token scripts above (relevant only if you hit
+                       it in old output dirs / branches)
+flywheel_common.py     shared fetch/group helpers for the repair/edit miners
+migrate_legacy_owner.py  one-time backfill of pre-auth rows -> a "legacy" user
+verify_auth_e2e.py     HTTP end-to-end auth check against a live stack
+stub_build123d/        fake build123d, PLUMBING TESTS ONLY, see warning above
 ```
 
 ### Why a direct interpreter, not codegen
@@ -106,6 +126,71 @@ build123d / OCCT kernel says, not an invented approximation — which
 matters because that's the signal you want the model to learn to read at
 inference time when a user's edit breaks their part.
 
+## Dataset record format & task types
+
+Every record in the pipeline (synthetic and flywheel-mined) shares one
+core shape, so `build_dataset.py`'s dedupe/split/chat-format steps never
+special-case a source. Fields come from `primitives.Record.to_dict()`
+(the synthetic generators) and the `mine_flywheel_*.py` scripts mirror
+it exactly (`source: "flywheel"` / `"production_flywheel"`):
+
+```json
+{
+  "record_id": "chain_abc123",
+  "task_type": "generate | repair | regenerate",
+  "schema_version": 2,
+  "complexity": 5,
+  "units": "mm",
+  "source": "procedural | flywheel | production_flywheel",
+  "instruction": "Add a 3mm fillet to the top edges.",
+  "json_ir": { "features": [ ... ] }
+}
+```
+
+Task-specific extra fields:
+
+- **`generate`** (`gen_single_feature.py`, `gen_chains.py`) — the base
+  shape above; chain records (and the regenerate records derived from
+  them) also carry `recipe` (base dims + step list) so
+  `gen_regenerate.py` can replay the same formulas with one edited input.
+- **`repair`** (`gen_repair.py`, flywheel step 2) — adds `broken_ir`,
+  `error`, `error_type` (always real build123d/OCCT output, never
+  hand-written; see "Why fault injection" above) and
+  `fault_description` (synthetic injectors only — `null` for real
+  production failures, which don't come with a label attached).
+- **`regenerate`** (`gen_regenerate.py`, flywheel step 3) — adds
+  `base_ir` (the part being edited) alongside the target `json_ir`.
+
+After verification, records also carry `verified` (bool — the flywheel
+scripts always write `verified: false` until step 4 re-runs them through
+real build123d) plus `geometry_stats` / `verification_error`.
+
+`chat_format.py` renders instruction + task context into the actual chat
+turns, shared by training and inference so the model sees identical
+wording at serving time. `build_dataset.py`'s final output is TRL's
+conversational `{"prompt": [...], "completion": [...]}` shape
+(`completion_only_loss=True`, see `training/README.md`):
+
+```json
+{
+  "prompt": [{ "role": "user", "content": "..." }],
+  "completion": [{ "role": "assistant", "content": "<json_ir as JSON>" }]
+}
+```
+
+Output files (`build_dataset.py --out-dir out`):
+
+| file | contents |
+|---|---|
+| `out/train.jsonl`, `out/val.jsonl` | Gemma chat-completion records (what `training/` consumes) |
+| `out/train.full.jsonl`, `out/val.full.jsonl` | same records, full IR + metadata, for debugging/inspection |
+| `out/*.quarantine.jsonl` | failed verification, each with `verification_error` |
+| `out/single_feature.verified.jsonl`, `out/chains.verified.jsonl`, `out/repair.jsonl`, `out/regenerate.jsonl` | per-generator intermediate state |
+
+The train/val split is by a hash of `record_id` (reproducible across
+runs), after dedup on an IR structural hash — see the known-limitations
+note about near-duplicate topologies.
+
 ## Data flywheel (Phase 4)
 
 Mines production usage (via `llm-service`'s request log) back into
@@ -129,6 +214,60 @@ training data. Pipeline order:
     `training/train.py`, either manual (point `TRAIN_FILE`/`VAL_FILE` at
     the gated output) or automated (compose job that runs `docker compose
     up train` when the gate passes).
+
+Two other repair-pair miners exist in the tree for historical reasons:
+`mine_flywheel_pairs.py` is an older standalone version of step 2 that
+consumes step 1's *filtered* events JSONL and takes
+`--max-lookforward-minutes`; `mine_repair_pairs.py` predates the auth
+work (no `--auth-token`; fetches project/version history on the caller's
+own scope) and is superseded by the admin-token scripts above.
+`flywheel_common.py` holds the shared helpers (`group_by_project`,
+token-aware `fetch_version`) that the step-2/3 scripts import. Remember
+everything mined below is `verified: false` until step 4 re-runs it
+through real build123d — nothing is trusted just because production
+logged it.
+
+**End to end** (requires the app stack running with real build123d;
+`$ADMIN_TOKEN` is a `make_admin.py`-granted admin session token):
+
+```bash
+# 1. extract outcome-classified events
+python mine_flywheel_data.py --llm-service-url http://localhost:8001 \
+    --auth-token "$ADMIN_TOKEN" --outcomes retried edited abandoned \
+    --out out/flywheel_events.jsonl
+
+# 2. repair pairs (fetches the full unfiltered log itself; alternative:
+#    mine_flywheel_pairs.py --in out/flywheel_events.jsonl)
+python mine_flywheel_repairs.py --llm-service-url http://localhost:8001 \
+    --auth-token "$ADMIN_TOKEN" --out out/flywheel_repairs.jsonl \
+    --unfixed-out out/flywheel_unfixed.jsonl
+
+# 3. edit pairs
+python mine_flywheel_edits.py --llm-service-url http://localhost:8001 \
+    --auth-token "$ADMIN_TOKEN" --out out/flywheel_edits.jsonl
+
+# 4. re-verify through real build123d (executor.BatchExecutor)
+python mine_flywheel_verify.py \
+    --repairs out/flywheel_repairs.jsonl --edits out/flywheel_edits.jsonl \
+    --out-repairs out/flywheel_repairs.verified.jsonl \
+    --out-edits out/flywheel_edits.verified.jsonl \
+    --quarantine out/flywheel_quarantine.jsonl
+
+# 5. dedup against the existing corpus
+python mine_flywheel_dedup.py --corpus out/train.full.jsonl out/val.full.jsonl \
+    --candidates out/flywheel_repairs.verified.jsonl out/flywheel_edits.verified.jsonl \
+    --out out/flywheel_deduped.jsonl
+
+# 7. merge into the next dataset build (re-checks verified=true itself)
+python build_dataset.py --n-single-per-type 300 --n-chains 3000 \
+    --n-repair 1500 --n-regenerate 1500 --out-dir out \
+    --include-flywheel-data out/flywheel_deduped.jsonl
+
+# 8. volume gate -- exit 1 if below threshold
+python mine_flywheel_gate.py --repairs out/flywheel_repairs.verified.jsonl \
+    --edits out/flywheel_edits.verified.jsonl \
+    --min-repairs 10 --min-edits 10 --min-total 50
+```
 
 **Auth (flywheel-auth fix, all 5 steps done)**: steps 1-3 above
 (`mine_flywheel_data.py`, `mine_flywheel_pairs.py`, and by extension
@@ -191,6 +330,67 @@ philosophy so regeneration doesn't produce stale/wrong selections.
   Sketch→Extrude→Fillet→Hole with different dims) from appearing on both
   sides. Tighten by hashing on a coarser "part family" tag if you add one.
 
+## Authentication, admin roles, and legacy data
+
+`llm-service` auth uses opaque session tokens (no JWT, no signing secret
+to manage): `POST /v1/auth/signup|login` return `{token, user}`, and
+every `/v1/projects*` and `/v1/logs*` call requires
+`Authorization: Bearer <token>`. Projects and the request log are scoped
+by owner/user — someone else's project returns 404 (not 403), and a
+second user can't see your events. Logout revokes immediately;
+`SESSION_LIFETIME_HOURS` (blank = never) only caps how long an unused
+token keeps working, and `RATE_LIMIT_PER_MINUTE` (default 60) is
+enforced per-user by an in-memory middleware that returns 429 with a
+`Retry-After` header (`<= 0` disables it entirely). Details live in
+`llm-service/app/store.py`, `rate_limiter.py`, and `main.py` — see
+`llm-service/README.md`.
+
+The flywheel miners need to see *every* user's events, which a normal
+user token structurally can't. Admin is a per-user `is_admin` flag;
+grant/revoke it on an existing user (sign up first — this CLI does not
+create accounts):
+
+```bash
+python llm-service/app/make_admin.py --db-path ./llm-service/data/cad_sessions.db \
+    --email you@example.com --apply        # grant (omit --apply for a dry run)
+python llm-service/app/make_admin.py --db-path ./llm-service/data/cad_sessions.db \
+    --email you@example.com --revoke --apply   # revoke
+```
+
+Admins get three unscoped routes, `/v1/admin/logs{,/outcomes,/summary}`
+(403 for non-admins), which the `mine_flywheel_*` scripts hit with
+`--auth-token` (or `LLM_SERVICE_ADMIN_TOKEN`). **Admin does NOT bypass
+project/version ownership** — fetching another user's project version
+still 404s, and the miners degrade that to "counted as unresolved", not
+a crash (see `flywheel_common.py`'s docstring).
+
+Pre-auth legacy rows (`projects.owner_id IS NULL`, `request_log.user_id
+IS NULL`) are a deliberate stopgap — still visible to any authenticated
+user — until you run the backfill:
+
+```bash
+python migrate_legacy_owner.py --db-path ./llm-service/data/cad_sessions.db \
+    --owner-email legacy@yourcompany.example          # dry-run report first
+python migrate_legacy_owner.py --db-path ./llm-service/data/cad_sessions.db \
+    --owner-email legacy@yourcompany.example --apply  # actually write
+```
+
+It assigns all pre-auth rows to one designated "legacy" user (created on
+demand with a random password), is idempotent (only NULL columns are
+ever written), and deliberately never touches stateless `/v1/generate`
+log rows that have no project to anchor an owner to.
+
+`verify_auth_e2e.py` (repo root) is the end-to-end check of the whole
+auth surface against a live stack — signup/login, cross-user 404s,
+project-list and request-log scoping — exit 0/1, usable as a deploy/CI
+gate:
+
+```bash
+docker compose up --build   # then, in another shell:
+python verify_auth_e2e.py --llm-service-url http://localhost:8001
+python verify_auth_e2e.py --llm-service-url http://localhost:8001 --expect-migrated
+```
+
 ## Running the application
 
 The dataset/training pipeline above (and `training/`) is offline batch
@@ -229,5 +429,4 @@ python3 build_dataset.py \
 # outputs:
 #   out/train.jsonl, out/val.jsonl          <- Gemma chat-completion format
 #   out/train.full.jsonl, out/val.full.jsonl <- same records with full IR/metadata
-#   out/*.quarantine.jsonl                   <- failed verification, for debugging
-```
+#   out/*.quarantine.jsonl
