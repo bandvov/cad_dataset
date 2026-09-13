@@ -37,12 +37,37 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Arrow-key panning needs this element to actually receive keyboard
+    // focus -- a bare <canvas> isn't focusable by default without a
+    // tabIndex. outline is suppressed since OrbitControls' own
+    // interaction is the visual feedback, not a browser focus ring.
+    renderer.domElement.tabIndex = 0;
+    renderer.domElement.style.outline = "none";
     mount.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    // OrbitControls has arrow-key panning built in (default keys: Left/
+    // Up/Right/Down -> PAN), it just needs to be told which element to
+    // listen on -- listenToKeyEvents() is what wires that up. keyPanSpeed
+    // is tuned down a bit from the library default so a single keypress
+    // doesn't jump too far relative to typical part sizes here; bump it
+    // if parts feel slow to pan across.
+    controls.listenToKeyEvents(renderer.domElement);
+    controls.keyPanSpeed = 12;
     controlsRef.current = controls;
+
+    // Focus the canvas once it's mounted so arrow keys work immediately
+    // without requiring an extra click first. A click anywhere in the
+    // viewport (which OrbitControls' own pointer handlers already listen
+    // for) also re-focuses it, since focus can be lost by clicking
+    // elsewhere in the app (e.g. the chat input).
+    renderer.domElement.focus();
+    function handlePointerDown() {
+      renderer.domElement.focus();
+    }
+    renderer.domElement.addEventListener("pointerdown", handlePointerDown);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.55));
     const key = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -85,6 +110,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
       cancelAnimationFrame(frameId);
       window.removeEventListener("resize", handleResize);
       resizeObserver.disconnect();
+      renderer.domElement.removeEventListener("pointerdown", handlePointerDown);
       controls.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === mount) {
@@ -166,6 +192,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
       <div className="viewer-hud">
         <div className="hud-line">CAD COPILOT / VIEWPORT</div>
         {bboxLabel && <div className="hud-line">bbox {bboxLabel}</div>}
+        <div className="hud-line">click viewport, then use arrow keys to pan</div>
       </div>
 
       {hasPart && !isLoading && (
