@@ -369,6 +369,12 @@ button {
   color: var(--text-primary);
 }
 
+.feature-item .feature-id {
+  color: #999;
+  font-size: 0.85em;
+  margin-left: 0.35em;
+}
+
 .feature-summary {
   font-family: var(--font-mono);
   font-size: 11px;

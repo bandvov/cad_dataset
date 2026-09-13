@@ -121,7 +121,7 @@ function FeatureItem({ feature, jsonIr, onApplyEdit }) {
           {FEATURE_GLYPHS[feature.feature_type] ?? "•"}
         </span>
         <span className="feature-type">
-          {feature.feature_type}
+          {feature.feature_type} <span className="feature-id">ID: {feature.id}</span>
           {editableFields && <span className="feature-edit-hint">edit</span>}
         </span>
         <span className="feature-summary">{featureSummary(feature)}</span>
