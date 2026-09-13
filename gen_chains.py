@@ -66,6 +66,40 @@ pattern already used to gate hole_fillet on an existing hole, just
 running in the other direction (gate is dropped going forward, not
 becoming available going forward).
 
+NOTE ON THE "interior_rim_fillet" / "interior_rim_chamfer" STEPS (added):
+a third near_point training-data producer, this time isolating the
+interior rim a Shell operation creates -- the loop of edges where the
+hollow interior's floor meets its walls, as distinct from the exterior
+bottom perimeter apply_fillet/apply_chamfer's axis/criterion selector
+would grab with filter_by=Z/criterion=min. That distinction is exactly
+what schema.py's near_point selector's "null coordinate = don't constrain
+this axis" feature exists for: apply_shell here always opens on Z-max
+("top" -- see its own docstring), so the offset it applies to every OTHER
+face (including the bottom) means the interior floor always ends up at a
+uniform Z = wall thickness, regardless of X/Y position -- nulling X and Y
+while constraining only Z (point=[None, None, thickness]) matches every
+edge on that one rim loop in a single selector, rather than needing one
+selector per edge the way apply_edge_fillet/apply_edge_chamfer do. This
+is a DIFFERENT near_point usage pattern from every other near_point
+producer in this file (hole_fillet, edge_fillet, edge_chamfer all
+constrain all three axes to isolate one specific edge) -- deliberately
+included as its own step so a fine-tuned model actually sees an example
+of nulling more than one axis, not just the single-axis-null "match both
+rim edges of a through-hole" case schema.py's docstring describes but
+this file otherwise never demonstrates.
+
+GATING (interior_rim): the reverse shape of edge_fillet/edge_chamfer's
+gate. These steps require a "shell" to have already run (state.shell_
+thickness, set by apply_shell, gives them their target Z) -- excluded
+from the pool until then, the same way hole_fillet is gated on an
+existing hole. Once available, they're revoked again if any FURTHER
+silhouette-changing step (another shell, or a boss) runs afterward:
+either could shift where the interior floor actually sits in ways this
+formula doesn't re-derive, and a second geometry-changing operation
+compounding with the first is exactly the class of low-yield combination
+edge_fillet/edge_chamfer's own gating already avoids elsewhere in this
+file.
+
 Run standalone: python gen_chains.py --n 500 --out out/chains.jsonl
 """
 
@@ -87,6 +121,12 @@ class PartState:
         # module docstring). Each entry: {"id", "position", "radius",
         # "depth", "through"}.
         self.holes: list[dict] = []
+        # Wall thickness of the most recent Shell step, if any -- set by
+        # apply_shell(), consumed by apply_interior_rim_fillet()/
+        # apply_interior_rim_chamfer() to locate the interior floor's Z
+        # (see module docstring's "interior_rim" note). None until a
+        # shell has actually run.
+        self.shell_thickness: float | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +285,56 @@ def apply_edge_chamfer(state: PartState, idgen: IdGen, features: list, params: d
     return f"chamfer just {desc} by {length}mm"
 
 
+def _interior_rim_selector(state: PartState) -> tuple[dict, float]:
+    """Shared geometry for apply_interior_rim_fillet/apply_interior_rim_
+    chamfer: the near_point selector that matches every edge of a shelled
+    part's interior floor rim in one shot, plus a size ceiling (the
+    smaller of the wall thickness and the block's own min_edge, so the
+    feature can never be sized larger than the material it's cutting
+    into). See this module's docstring for why nulling X/Y while
+    constraining only Z is safe specifically because apply_shell always
+    opens on Z-max here.
+
+    Tolerance is capped well under state.shell_thickness itself (never
+    more than a quarter of it, and at most 0.3mm) so this can never
+    accidentally sweep in the UNRELATED exterior-bottom edge group at
+    Z=0, which sits a full wall-thickness away."""
+    thickness = state.shell_thickness
+    tolerance = round(max(0.05, min(0.3, thickness * 0.25)), 2)
+    size_ceiling = min(state.min_edge, thickness)
+    selector = {"of": "edges", "filter_by": "near_point",
+                "point": [None, None, thickness], "tolerance": tolerance}
+    return selector, size_ceiling
+
+
+def apply_interior_rim_fillet(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
+    """Fillets the entire interior rim -- where a shelled part's hollow
+    floor meets its walls -- in one feature, via a near_point selector
+    that constrains only Z (nulling X/Y). See this module's docstring for
+    why that's the correct selector here and why apply_edge_fillet's
+    fully-constrained near_point pattern wouldn't work: this rim is a
+    closed loop of multiple edges, not a single one."""
+    selector, size_ceiling = _interior_rim_selector(state)
+    radius = max(0.2, round(size_ceiling * 0.25, 2))
+    features.append({
+        "id": idgen.next("fillet"), "feature_type": "Fillet",
+        "selector": selector, "radius": radius,
+    })
+    return f"round the interior rim where the hollow floor meets the walls with a {radius}mm fillet"
+
+
+def apply_interior_rim_chamfer(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
+    """Same as apply_interior_rim_fillet but Chamfer/`length` -- see that
+    function's docstring."""
+    selector, size_ceiling = _interior_rim_selector(state)
+    length = max(0.2, round(size_ceiling * 0.25, 2))
+    features.append({
+        "id": idgen.next("chamfer"), "feature_type": "Chamfer",
+        "selector": selector, "length": length,
+    })
+    return f"chamfer the interior rim where the hollow floor meets the walls by {length}mm"
+
+
 def apply_shell(state: PartState, idgen: IdGen, features: list, params: dict) -> str:
     thickness = round(min(max(state.min_edge * 0.2, 1.0), 6.0, state.min_edge * 0.3), 2)
     features.append({
@@ -252,6 +342,7 @@ def apply_shell(state: PartState, idgen: IdGen, features: list, params: dict) ->
         "open_selector": {"of": "faces", "filter_by": "Z", "criterion": "max"},
     })
     state.min_edge = min(state.min_edge, thickness)
+    state.shell_thickness = thickness
     return f"shell it out to a {thickness}mm wall thickness, open on top"
 
 
@@ -298,6 +389,8 @@ STEP_REGISTRY = {
     "hole_fillet": apply_hole_fillet,
     "edge_fillet": apply_edge_fillet,
     "edge_chamfer": apply_edge_chamfer,
+    "interior_rim_fillet": apply_interior_rim_fillet,
+    "interior_rim_chamfer": apply_interior_rim_chamfer,
     "shell": apply_shell,
     "linear_pattern": apply_linear_pattern,
     "circular_pattern": apply_circular_pattern,
@@ -306,6 +399,7 @@ STEP_REGISTRY = {
 STEP_WEIGHTS = {
     "fillet": 1.0, "chamfer": 0.8, "hole": 1.2, "hole_fillet": 0.7,
     "edge_fillet": 0.7, "edge_chamfer": 0.6,
+    "interior_rim_fillet": 0.5, "interior_rim_chamfer": 0.45,
     "shell": 0.5,
     "linear_pattern": 0.6, "circular_pattern": 0.5, "boss": 0.9,
 }
@@ -313,9 +407,12 @@ STEP_WEIGHTS = {
 # raised sub-feature to the top face, a shell hollows/offsets the whole
 # solid) -- once either has run, edge_fillet/edge_chamfer's real edge
 # geometry can drift away from the point _edge_target_point() computes
-# from state.w/h/t alone. See module docstring's "GATING" note.
+# from state.w/h/t alone. See module docstring's "GATING" note. A second
+# occurrence of either ALSO revokes interior_rim_fillet/interior_rim_
+# chamfer once they've become available -- see that docstring note.
 SILHOUETTE_CHANGING_STEPS = {"boss", "shell"}
 EDGE_TARGETING_STEPS = {"edge_fillet", "edge_chamfer"}
+INTERIOR_RIM_STEPS = {"interior_rim_fillet", "interior_rim_chamfer"}
 
 
 def sample_recipe(rng: random.Random, n_extra: int) -> dict:
@@ -339,6 +436,13 @@ def sample_recipe(rng: random.Random, n_extra: int) -> dict:
     # the rest of this recipe -- their near_point target assumes the
     # block's silhouette is still the plain original rectangle.
     silhouette_changed = False
+    # See module docstring's "interior_rim" GATING note: the reverse
+    # shape -- interior_rim_fillet/interior_rim_chamfer only become
+    # available once a shell has actually run (has_shelled), and are
+    # revoked again (interior_rim_locked) if any FURTHER silhouette-
+    # changing step runs after that.
+    has_shelled = False
+    interior_rim_locked = False
     for _ in range(n_extra):
         # avoid the same step repeating back-to-back on the same selector
         # (e.g. chamfering the already-chamfered bottom edge again) -- low
@@ -352,11 +456,25 @@ def sample_recipe(rng: random.Random, n_extra: int) -> dict:
         # actually changed
         if silhouette_changed:
             pool_names = [n for n in pool_names if n not in EDGE_TARGETING_STEPS]
+        # interior_rim_fillet/interior_rim_chamfer need a shell's wall
+        # thickness to target, and are revoked again once locked (a
+        # further silhouette-changing step ran after the shell)
+        if not has_shelled or interior_rim_locked:
+            pool_names = [n for n in pool_names if n not in INTERIOR_RIM_STEPS]
         pool_weights = [STEP_WEIGHTS[n] for n in pool_names]
         name = rng.choices(pool_names, weights=pool_weights, k=1)[0]
         last_name = name
         if name in SILHOUETTE_CHANGING_STEPS:
+            if silhouette_changed:
+                # this is a SECOND (or later) silhouette-changing step --
+                # revoke interior_rim availability going forward, same
+                # "exclude once a precondition is no longer safe" pattern
+                # edge_fillet/edge_chamfer already use in the other
+                # direction
+                interior_rim_locked = True
             silhouette_changed = True
+            if name == "shell":
+                has_shelled = True
         params = {}
         if name == "hole":
             params["through"] = rng.random() < 0.6
