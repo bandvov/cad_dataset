@@ -18,13 +18,13 @@ function makeFaceTexture(label) {
   canvas.width = 128;
   canvas.height = 128;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#21252c";
+  ctx.fillStyle = "#ebebeb";
   ctx.fillRect(0, 0, 128, 128);
-  ctx.strokeStyle = "#3a4048";
+  ctx.strokeStyle = "#a7b0be";
   ctx.lineWidth = 4;
   ctx.strokeRect(2, 2, 124, 124);
-  ctx.fillStyle = "#4fb8";
-  ctx.font = "600 18px 'IBM Plex Mono', monospace";
+  ctx.fillStyle = "#1f242c";
+  ctx.font = "700 20px 'IBM Plex Mono', monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, 64, 64);
@@ -79,9 +79,9 @@ export default function ViewCube({ mainCameraRef, mainControlsRef, size = 88 }) 
       ]);
       edgeGroup.add(new THREE.Line(geo, edgeMat(color)));
     };
-    line([-half, -half, -half], [half, -half, -half], 0xd9634f); // X, red
-    line([-half, -half, -half], [-half, half, -half], 0x4fb87a); // Y, green
-    line([-half, -half, -half], [-half, -half, half], 0x4f8fb8); // Z, blue
+    line([-half, -half, -half], [half, -half, -half], 0xe84a3b); // X, red
+    line([-half, -half, -half], [-half, half, -half], 0x2b8f53); // Y, green
+    line([-half, -half, -half], [-half, -half, half], 0x2f6fae); // Z, blue
     scene.add(edgeGroup);
 
     const raycaster = new THREE.Raycaster();
