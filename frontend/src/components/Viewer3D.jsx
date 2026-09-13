@@ -5,6 +5,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import ViewCube from "./ViewCube";
 import ExportBar from "./ExportBar";
 import RenderModeToggle from "./RenderModeToggle";
+import EdgeOverlayToggle from "./EdgeOverlayToggle";
 import { base64ToArrayBuffer } from "../lib/base64";
 import { applyRenderMode } from "../lib/viewerRenderMode";
 
@@ -17,6 +18,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
   const [loadError, setLoadError] = useState(null);
   const [bboxLabel, setBboxLabel] = useState(null);
   const [renderMode, setRenderMode] = useState("solid");
+  const [showEdges, setShowEdges] = useState(false);
 
   // one-time scene/camera/renderer/controls setup
   useEffect(() => {
@@ -114,8 +116,8 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
           scene.remove(currentModelRef.current);
         }
 
-        const model = gltf.scene;        
-        applyRenderMode(model, renderMode);
+        const model = gltf.scene;
+        applyRenderMode(model, { mode: renderMode, showEdges });
 
         const box = new THREE.Box3().setFromObject(model);
         const center = box.getCenter(new THREE.Vector3());
@@ -143,19 +145,19 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
         setLoadError("Couldn't render the generated model.");
       }
     );
-    // Intentionally NOT depending on renderMode -- a mode change is
-    // handled by the effect below re-materialing the already-loaded
-    // model in place, not by re-parsing/re-fetching the GLB.
+    // Intentionally NOT depending on renderMode/showEdges -- a mode/edge
+    // change is handled by the effect below re-materialing the
+    // already-loaded model in place, not by re-parsing/re-fetching the GLB.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [glbBase64]);
 
-  // re-apply materials when the toggle changes, without touching the
+  // re-apply materials when either toggle changes, without touching the
   // GLB data itself -- the model stays loaded, only its appearance changes
   useEffect(() => {
     if (currentModelRef.current) {
-      applyRenderMode(currentModelRef.current, renderMode);
+      applyRenderMode(currentModelRef.current, { mode: renderMode, showEdges });
     }
-  }, [renderMode]);
+  }, [renderMode, showEdges]);
 
   return (
     <div className="viewer-wrap">
@@ -169,6 +171,7 @@ export default function Viewer3D({ glbBase64, isLoading, hasPart, onDownload }) 
       {hasPart && !isLoading && (
         <div className="viewer-toolbar">
           <RenderModeToggle mode={renderMode} onChange={setRenderMode} />
+          <EdgeOverlayToggle showEdges={showEdges} onChange={setShowEdges} />
           <ExportBar onDownload={onDownload} />
         </div>
       )}
