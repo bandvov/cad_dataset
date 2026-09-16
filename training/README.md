@@ -87,7 +87,7 @@ for why). If `../out/train.jsonl` predates that change, regenerate it:
 
 ```bash
 cd ..
-python3 build_dataset.py --n-single-per-type 300 --n-chains 3000 \
+python build_dataset.py --n-single-per-type 300 --n-chains 3000 \
     --n-repair 1500 --n-regenerate 1500 --out-dir out
 ```
 

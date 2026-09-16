@@ -63,6 +63,24 @@ def verify_records(records: list[dict], be: BatchExecutor | None, skip: bool,
     return verified, quarantined
 
 
+def content_hash(ir: dict) -> str:
+    """Exact-content hash (floats rounded to avoid FP-noise false
+    negatives) -- for TRUE duplicate detection only. Two records with the
+    same topology but different dimensions must NOT collide here."""
+    def _round(obj):
+        if isinstance(obj, float):
+            return round(obj, 6)
+        if isinstance(obj, dict):
+            return {k: _round(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_round(v) for v in obj]
+        return obj
+    return hashlib.sha1(json.dumps(_round(ir), sort_keys=True).encode()).hexdigest()
+
+
+# structure_hash(ir) unchanged -- now used ONLY for per-family diversity
+# capping, not as the duplicate test.
+
 def structure_hash(ir: dict) -> str:
     """Hash of feature_type sequence + operation choices, used for dedup
     and for family-based (not random) train/val split, so val measures
@@ -128,6 +146,8 @@ def main():
                     "to merge into the same dedup+split+chat-format pipeline as "
                     "synthetic data. Records without verified=true are dropped "
                     "with a warning, never trusted just because the file claims it.")
+    ap.add_argument("--max-per-bucket", type=int, default=8,
+                    help="max dimensional variants kept per (task_type, topology) family")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -214,17 +234,33 @@ def main():
 
     # ---- dedupe + family-based split + chat format ----
     all_records = generate_pool + repair_records + regen_records + flywheel_records
-    seen_hashes = set()
+
+    # ---- exact dedup, then per-structural-family cap, then split + chat format ----
+    seen_content: set[tuple[str, str]] = set()
+    bucket_counts: dict[tuple[str, str], int] = {}
     deduped = []
+    n_exact_dupes = n_bucket_capped = 0
+
     for r in all_records:
-        ir_for_hash = r["json_ir"]
-        h = structure_hash(ir_for_hash)
-        key = (r["task_type"], h)
-        if key in seen_hashes:
+        task = r["task_type"]
+
+        c_key = (task, content_hash(r["json_ir"]))
+        if c_key in seen_content:
+            n_exact_dupes += 1
             continue
-        seen_hashes.add(key)
+        seen_content.add(c_key)
+
+        s_key = (task, structure_hash(r["json_ir"]))
+        count = bucket_counts.get(s_key, 0)
+        if count >= args.max_per_bucket:
+            n_bucket_capped += 1
+            continue
+        bucket_counts[s_key] = count + 1
         deduped.append(r)
-    print(f"== {len(all_records)} total, {len(deduped)} after structural dedupe ==")
+
+    print(f"== {len(all_records)} total: {n_exact_dupes} exact duplicates, "
+        f"{n_bucket_capped} over per-bucket cap ({args.max_per_bucket}), "
+        f"{len(deduped)} kept ==")
 
     def split_bucket(record_id: str) -> str:
         h = int(hashlib.sha1(record_id.encode()).hexdigest(), 16)
