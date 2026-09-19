@@ -168,6 +168,44 @@ def _print_template_sample(dataset, tokenizer):
     print("=" * 70)
 
 
+def _report_token_lengths(dataset, tokenizer, max_seq_length: int, name: str = "train"):
+    """Token-length distribution of full prompt+completion examples as the
+    chat template renders them. Anything over max_seq_length gets truncated
+    by SFTTrainer -- for this project that means a JSON IR cut off
+    mid-document, so check the fit % before a long run."""
+    lengths = []
+    for ex in dataset:
+        text = tokenizer.apply_chat_template(
+            ex["prompt"] + ex["completion"], tokenize=False, add_generation_prompt=False,
+        )
+        # add_special_tokens=False: the chat template already emits BOS, so
+        # letting the tokenizer add another would overcount by one
+        lengths.append(
+            len(tokenizer(text, add_special_tokens=False)["input_ids"]))
+
+    if not lengths:
+        print(f"[length-stats] {name}: empty dataset")
+        return
+    lengths.sort()
+    n = len(lengths)
+    def pct(p): return lengths[min(n - 1, int(n * p))]
+
+    print("=" * 70)
+    print(f"TOKEN LENGTHS ({name}, prompt+completion, chat-templated)")
+    print(f"Examples: {n}")
+    print(f"Min:      {lengths[0]}")
+    print(f"Mean:     {sum(lengths) / n:.0f}")
+    print(f"Median:   {pct(0.50)}")
+    print(f"90%:      {pct(0.90)}")
+    print(f"95%:      {pct(0.95)}")
+    print(f"99%:      {pct(0.99)}")
+    print(f"Max:      {lengths[-1]}")
+    for limit in sorted({512, 1024, 1536, 2048, 4096, max_seq_length}):
+        fit = sum(x <= limit for x in lengths)
+        marker = "  <-- max_seq_length" if limit == max_seq_length else ""
+        print(f"{limit}: {fit / n * 100:.1f}% fit{marker}")
+    print("=" * 70)
+
 def _compute_warmup_steps(n_train_examples: int, per_device_batch_size: int,
                            grad_accum: int, num_epochs: float, warmup_ratio: float) -> int:
     """Converts the user-facing --warmup-ratio into a step count, since
@@ -418,7 +456,9 @@ def main():
     # template internally.
 
     _print_template_sample(raw["train"], tokenizer)
-
+    _report_token_lengths(raw["train"], tokenizer,
+                          args.max_seq_length, name="train")
+    
     reconciled_save_steps = _reconcile_save_eval_steps(args.save_steps, args.eval_steps)
 
     warmup_steps = _compute_warmup_steps(
