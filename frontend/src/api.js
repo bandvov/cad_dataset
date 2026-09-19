@@ -264,10 +264,20 @@ export async function logDownload(projectId) {
   }
 }
 
+/**
+ * mode: "full" (default) regenerates the whole feature tree; "append"
+ * asks the model for only the new feature(s) and merges server-side --
+ * see llm-service/app/orchestrator.py's APPEND MODE note. Response now
+ * also carries "mode" ("append" | "full") reflecting which path actually
+ * ran (append silently falls back to full on a project with no current
+ * version yet -- see main.py's project_generate docstring), so callers
+ * can trust the response over what they asked for.
+ */
 export async function generateInProject({
   projectId,
   prompt,
   maxAttempts = 3,
+  mode = "full",
 }) {
   const res = await authFetch(`${API_BASE}/v1/projects/${projectId}/generate`, {
     method: "POST",
@@ -276,6 +286,7 @@ export async function generateInProject({
       prompt,
       max_attempts: maxAttempts,
       export_format: "glb",
+      mode,
     }),
   });
   return handleResponse(res);

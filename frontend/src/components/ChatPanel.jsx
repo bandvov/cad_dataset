@@ -2,6 +2,13 @@ import { useState, useRef, useEffect } from "react";
 
 export default function ChatPanel({ messages, onSend, isLoading }) {
   const [input, setInput] = useState("");
+  // Append mode (see llm-service/app/orchestrator.py's APPEND MODE note):
+  // when on, the model is asked for only the new feature(s) to add
+  // rather than the whole tree -- faster, but only correct for pure
+  // additions. Starts off so default behavior is unchanged; per-message,
+  // not persisted, since whether an edit is additive varies message to
+  // message.
+  const [appendMode, setAppendMode] = useState(false);
   const listRef = useRef(null);
 
   useEffect(() => {
@@ -14,7 +21,7 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
     e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
-    onSend(trimmed);
+    onSend(trimmed, appendMode ? "append" : "full");
     setInput("");
   }
 
@@ -71,7 +78,22 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
           disabled={isLoading}
         />
         <div className="chat-input-row">
-          <span className="chat-input-hint">enter to send · shift+enter for newline</span>
+          <div className="chat-input-left">
+            <span className="chat-input-hint">enter to send · shift+enter for newline</span>
+            <button
+              type="button"
+              className={`chat-mode-toggle${appendMode ? " chat-mode-toggle-active" : ""}`}
+              onClick={() => setAppendMode((v) => !v)}
+              disabled={isLoading}
+              title={
+                appendMode
+                  ? "Append mode: the model generates only the new feature(s) to add (faster). Only use this for additions -- click to switch back to full regenerate for edits/removals."
+                  : "Full mode: the model regenerates the whole feature tree. Click to switch to append-only mode for pure additions (faster)."
+              }
+            >
+              {appendMode ? "⚡ Append only" : "Full regenerate"}
+            </button>
+          </div>
           <button
             type="submit"
             className="chat-send-btn"

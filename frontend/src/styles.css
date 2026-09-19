@@ -758,12 +758,54 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
+}
+
+/* Wraps the keyboard hint + the append/full mode toggle so they sit
+   together on the left of the send button (see ChatPanel.jsx). */
+.chat-input-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .chat-input-hint {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Append/full generation-mode toggle -- same visual family as
+   viewer-mode-btn/history-btn (quiet, technical) rather than a switch
+   component, consistent with the rest of the drafting-table register. */
+.chat-mode-toggle {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-mode-toggle:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.chat-mode-toggle-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.chat-mode-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .chat-send-btn {

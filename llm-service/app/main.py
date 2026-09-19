@@ -59,6 +59,17 @@ loop made). Both come straight from orchestrator.GenerateResult /
 generate_stream()'s terminal event -- see that module's docstring for how
 they're accumulated -- this file just forwards them, it doesn't compute
 anything itself.
+
+CHANGE (append mode): ProjectGenerateRequest gained `mode: "full" |
+"append"` (default "full", so every existing caller is unaffected).
+"append" routes to orchestrator.generate_append() instead of
+orchestrator.generate() -- see orchestrator.py's module docstring for
+why (only the new feature(s) are generated, not the whole tree, cutting
+completion-token latency on edits). Only meaningful with an existing
+project (there's nothing to append to on a brand-new part): if the
+project has no current version yet, this falls back to "full" rather
+than erroring, since a fresh part still needs the whole-tree path
+regardless of what the caller asked for.
 """
 
 from __future__ import annotations
@@ -342,6 +353,12 @@ class ProjectGenerateRequest(BaseModel):
     prompt: str
     max_attempts: int = 3
     export_format: Literal["step", "stl", "glb"] | None = "glb"
+    # "append": ask the model for only the new feature(s) and merge
+    # server-side (orchestrator.generate_append) instead of regenerating
+    # the whole tree -- see orchestrator.py's APPEND MODE note. Default
+    # "full" preserves existing behavior for every caller that doesn't
+    # opt in.
+    mode: Literal["full", "append"] = "full"
 
 
 def _export_field(export_format: str | None):
@@ -447,11 +464,24 @@ async def project_generate(project_id: str, req: ProjectGenerateRequest,
     automatically from the project's current version (None for a
     project's first generation), and a successful result is appended as
     a new version -- this IS the "edits compose" behavior, not something
-    the frontend has to orchestrate by passing base_ir itself."""
+    the frontend has to orchestrate by passing base_ir itself.
+
+    req.mode == "append" routes to orchestrator.generate_append() instead
+    of orchestrator.generate() -- the model is only asked for the new
+    feature(s), not the whole tree (see orchestrator.py's APPEND MODE
+    note). Silently falls back to "full" when there's no current version
+    to append onto (a project's very first generation): append mode is
+    an edit-time optimization, not a way to create a part from nothing,
+    so a caller that defaults every request to "append" still works
+    correctly on a fresh project rather than erroring."""
     project = _require_owned_project(project_id, user)
 
     base_ir = project["current"]["json_ir"] if project["current"] else None
-    result = await orchestrator.generate(req.prompt, base_ir, req.max_attempts)
+    use_append = req.mode == "append" and base_ir is not None
+    if use_append:
+        result = await orchestrator.generate_append(req.prompt, base_ir, req.max_attempts)
+    else:
+        result = await orchestrator.generate(req.prompt, base_ir, req.max_attempts)
 
     response = {
         "success": result.success,
@@ -462,6 +492,7 @@ async def project_generate(project_id: str, req: ProjectGenerateRequest,
         "conversation": result.conversation,
         "elapsed_s": result.elapsed_s,
         "usage": result.usage,
+        "mode": "append" if use_append else "full",
     }
     version_index = None
     if result.success:

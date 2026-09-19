@@ -24,6 +24,24 @@ must match what build_dataset.py rendered at training time, or you
 reintroduce exactly the kind of train/serve skew bug this project already
 hit once (the "model" vs "assistant" role mismatch).
 
+APPEND MODE (added): generate_append_stream()/generate_append() are a
+patch-based sibling of the full-tree loop above, for edits to an
+existing part. Instead of asking the model to re-emit the entire
+feature tree (the completion-token cost that scales with part size and
+dominates latency, since decode is serial), the prompt
+(chat_format.render_append_user_turn) asks for ONLY the new feature(s)
+to add; patch.apply_patch() merges them into base_ir server-side, and
+the MERGED tree goes through the identical validate/compile/repair path
+as every other mode -- a bad append is just a bad IR once merged, so the
+repair loop doesn't need a separate contract for it. This is a prompt-
+framing + parsing change only; the model was not fine-tuned for this
+narrower instruction (see chat_format.render_append_user_turn's
+docstring), so treat it as an experiment to measure, not a guaranteed
+win, until real append-mode training data exists (gen_patch.py, not yet
+built). Only handles pure additions -- modify/delete of existing
+features still needs the full-tree path (or a future patch verb) until
+that data exists too.
+
 DEBUGGING: set LLM_SERVICE_DEBUG=0 to silence the print()s below (on by
 default). They print straight to stdout/container logs, not through
 python's `logging` module -- deliberately simple since this is meant for
@@ -90,7 +108,9 @@ llama.cpp is expected to report `usage` on every /v1/chat/completions
 response (documented OpenAI-compatible behavior); if a given server build
 omits it, `_accumulate_usage()` just skips that attempt's contribution
 rather than raising, so a missing usage block degrades to "token counts
-under-reported," not a broken request.
+under-reported," not a broken request. generate_append_stream() reuses
+the same _accumulate_usage/_empty_usage helpers so its GenerateResult is
+shaped identically -- callers don't need to know which mode produced it.
 
 NOTE: not executed in the sandbox this was authored in -- no httpx
 installed there, no network to reach a real llama.cpp or geometry
@@ -111,6 +131,7 @@ from dataclasses import dataclass, field
 import httpx
 
 import chat_format
+from patch import apply_patch, PatchError
 
 _DEBUG = os.environ.get("LLM_SERVICE_DEBUG", "1") not in ("0", "false", "False", "")
 
@@ -196,6 +217,39 @@ def extract_json(text: str) -> tuple[dict | None, str | None]:
             last_err = str(e)
 
     start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1]), None
+        except json.JSONDecodeError as e:
+            last_err = str(e)
+
+    return None, last_err
+
+
+def extract_feature_list(text: str) -> tuple[list[dict] | None, str | None]:
+    """Same permissiveness as extract_json() above, but for the append-
+    mode completion shape: a bare JSON array of new feature objects
+    instead of a full {"features": [...]} tree. Kept as a separate
+    function (not a mode flag on extract_json) since the two return
+    types genuinely differ and callers shouldn't have to isinstance-
+    check the result."""
+    text = _strip_gemma4_leaks(text.strip())
+    last_err: str | None = None
+
+    try:
+        parsed = json.loads(text)
+        return (parsed, None) if isinstance(parsed, list) else (None, "expected a JSON array")
+    except json.JSONDecodeError as e:
+        last_err = str(e)
+
+    fenced = re.search(r"```(?:json)?\s*(\[.*\])\s*```", text, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1)), None
+        except json.JSONDecodeError as e:
+            last_err = str(e)
+
+    start, end = text.find("["), text.rfind("]")
     if start != -1 and end != -1 and end > start:
         try:
             return json.loads(text[start:end + 1]), None
@@ -402,6 +456,125 @@ class Orchestrator:
                "error": last_error, "conversation": conversation,
                "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
 
+    async def generate_append_stream(self, prompt: str, base_ir: dict, max_attempts: int = 3):
+        """Patch-mode sibling of generate_stream() -- see module
+        docstring's APPEND MODE note. Only handles additions: the model
+        is asked for just the new feature(s), which are merged into
+        base_ir via patch.apply_patch() before validation. Same event
+        shape/terminal-event contract as generate_stream() (including
+        elapsed_s/usage), so main.py's NDJSON relay and STORE.log_event()
+        don't need to know which mode produced a given event stream.
+        base_ir is required -- there's nothing to append a feature to on
+        a brand-new part, so callers should route a base_ir=None request
+        to generate_stream() instead, not here."""
+        start_time = time.monotonic()
+        usage_totals = _empty_usage()
+
+        def _accumulate_usage(usage: dict | None) -> None:
+            if not usage:
+                return
+            for key in usage_totals:
+                val = usage.get(key)
+                if isinstance(val, (int, float)):
+                    usage_totals[key] += val
+
+        def _elapsed() -> float:
+            return round(time.monotonic() - start_time, 3)
+
+        user_turn = chat_format.render_append_user_turn(base_ir, prompt)
+        _debug(f"[orchestrator] === generate_append start === prompt={prompt!r} "
+               f"max_attempts={max_attempts}")
+
+        yield {"event": "start", "max_attempts": max_attempts}
+
+        messages = [{"role": "user", "content": user_turn}]
+        conversation = list(messages)
+        last_error: str | None = None
+        last_ir: dict | None = None
+
+        async with httpx.AsyncClient() as client:
+            for attempt in range(1, max_attempts + 1):
+                yield {"event": "attempt_start", "attempt": attempt, "max_attempts": max_attempts}
+                _debug(f"[orchestrator] --- append attempt {attempt}/{max_attempts} ---")
+
+                try:
+                    raw, usage = await self._chat(client, messages)
+                except httpx.HTTPError as e:
+                    _debug(f"[orchestrator] LLM request failed: {e}")
+                    yield {"event": "failure", "attempts": attempt, "json_ir": last_ir,
+                           "error": f"llm request failed: {e}", "conversation": conversation,
+                           "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
+                    return
+
+                _accumulate_usage(usage)
+                messages.append({"role": "assistant", "content": raw})
+                conversation.append({"role": "assistant", "content": raw})
+                yield {"event": "llm_response", "attempt": attempt, "content": raw}
+
+                new_features, parse_err = extract_feature_list(raw)
+                if new_features is None:
+                    last_error = parse_err or "model output was not a valid JSON array"
+                    _debug(f"[orchestrator] append parse FAILED: {last_error}")
+                    yield {"event": "attempt_failed", "attempt": attempt,
+                           "error_type": "ParseError", "error": last_error}
+                    repair_turn = (
+                        "Your last response was not a valid JSON array of new "
+                        "feature object(s). Respond with ONLY that array, no "
+                        f"other text.\n\nError: {last_error}"
+                    )
+                else:
+                    try:
+                        merged = apply_patch(
+                            base_ir, [{"op": "append", "feature": f} for f in new_features])
+                    except PatchError as e:
+                        last_error = str(e)
+                        _debug(f"[orchestrator] append patch FAILED: {last_error}")
+                        yield {"event": "attempt_failed", "attempt": attempt,
+                               "error_type": "PatchError", "error": last_error}
+                        repair_turn = f"That was not a valid set of new features: {last_error}\n\nTry again."
+                    else:
+                        last_ir = merged
+                        yield {"event": "validating", "attempt": attempt}
+                        try:
+                            result = await self._compile(client, merged)
+                        except httpx.HTTPError as e:
+                            _debug(f"[orchestrator] geometry service request failed: {e}")
+                            yield {"event": "failure", "attempts": attempt, "json_ir": merged,
+                                   "error": f"geometry service request failed: {e}",
+                                   "conversation": conversation,
+                                   "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
+                            return
+                        if result.get("valid"):
+                            _debug(f"[orchestrator] === generate_append SUCCESS on attempt {attempt} ===")
+                            yield {"event": "success", "attempts": attempt, "json_ir": merged,
+                                   "stats": result.get("stats"), "conversation": conversation,
+                                   "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
+                            return
+                        last_error = result.get("error", "unknown validation error")
+                        yield {"event": "attempt_failed", "attempt": attempt,
+                               "error_type": result.get("error_type"), "error": last_error}
+                        # once merged, a bad append is just a bad IR -- reuse
+                        # the standard full-tree repair contract rather than
+                        # inventing a patch-specific one
+                        repair_turn = chat_format.render_repair_user_turn(
+                            broken_ir=merged, error=last_error)
+
+                messages[-1] = {
+                    "role": "assistant",
+                    "content": "[response omitted -- restated in the next message]",
+                }
+                messages.append({"role": "user", "content": repair_turn})
+                conversation.append({"role": "user", "content": repair_turn})
+                if attempt < max_attempts:
+                    _debug(f"[orchestrator] repairing -- feeding error back for attempt {attempt + 1}")
+                    yield {"event": "repairing", "attempt": attempt, "next_attempt": attempt + 1}
+
+        _debug(f"[orchestrator] === generate_append FAILURE -- exhausted {max_attempts} attempts. "
+               f"last_error={last_error!r} ===")
+        yield {"event": "failure", "attempts": max_attempts, "json_ir": last_ir,
+               "error": last_error, "conversation": conversation,
+               "elapsed_s": _elapsed(), "usage": dict(usage_totals)}
+
     async def generate(self, prompt: str, base_ir: dict | None = None,
                         max_attempts: int = 3) -> GenerateResult:
         """Non-streaming form: drains generate_stream() and returns just
@@ -423,6 +596,27 @@ class Orchestrator:
                                        usage=event.get("usage") or _empty_usage())
         # generate_stream() always yields exactly one terminal event -- if
         # we get here, that invariant broke
+        return GenerateResult(False, None, max_attempts, error="generator produced no terminal event")
+
+    async def generate_append(self, prompt: str, base_ir: dict,
+                               max_attempts: int = 3) -> GenerateResult:
+        """Non-streaming form of generate_append_stream() -- same
+        drain-and-return pattern as generate() above, kept as a thin
+        wrapper for the same reason: one loop implementation, not two
+        that can drift."""
+        async for event in self.generate_append_stream(prompt, base_ir, max_attempts):
+            if event["event"] == "success":
+                return GenerateResult(True, event["json_ir"], event["attempts"],
+                                       stats=event.get("stats"),
+                                       conversation=event.get("conversation", []),
+                                       elapsed_s=event.get("elapsed_s", 0.0),
+                                       usage=event.get("usage") or _empty_usage())
+            if event["event"] == "failure":
+                return GenerateResult(False, event.get("json_ir"), event["attempts"],
+                                       error=event.get("error"),
+                                       conversation=event.get("conversation", []),
+                                       elapsed_s=event.get("elapsed_s", 0.0),
+                                       usage=event.get("usage") or _empty_usage())
         return GenerateResult(False, None, max_attempts, error="generator produced no terminal event")
 
     async def compile_only(self, ir: dict) -> dict:

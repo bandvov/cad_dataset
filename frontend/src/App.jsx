@@ -44,13 +44,23 @@ function makeMessage(role, content, extra = {}) {
 }
 
 // Formats a generate/regenerate result's elapsed time + token usage into
-// one short readout line -- e.g. "2.4s · 812 in / 340 out tokens · 2
-// attempts". Returns null (rendered as nothing, see ChatPanel.jsx) when
-// there's nothing meaningful to show, which covers non-LLM paths like
-// applyEdit() where the response simply has no elapsed_s/usage at all
-// (see llm-service/app/main.py's project_apply_edit docstring).
+// one short readout line -- e.g. "patch · 2.4s · 812 in / 340 out tokens
+// · 2 attempts". Returns null (rendered as nothing, see ChatPanel.jsx)
+// when there's nothing meaningful to show, which covers non-LLM paths
+// like applyEdit() where the response simply has no elapsed_s/usage at
+// all (see llm-service/app/main.py's project_apply_edit docstring).
+//
+// "patch" appears when result.mode === "append" -- i.e. the append-only
+// path actually ran (see ChatPanel.jsx's toggle / api.js's
+// generateInProject `mode`). This can differ from what the user asked
+// for: main.py's project_generate silently falls back to "full" on a
+// project with no current version yet, so the readout reflects what the
+// backend actually did, not just the toggle state at send time.
 function formatGenerateMeta(result) {
   const parts = [];
+  if (result.mode === "append") {
+    parts.push("patch");
+  }
   if (typeof result.elapsed_s === "number") {
     parts.push(`${result.elapsed_s.toFixed(1)}s`);
   }
@@ -380,14 +390,19 @@ function ProjectWorkspace({ currentUser, onLogout }) {
     return proj.id;
   }, [projectId, navigate]);
 
+  // mode: "full" (default) or "append" (see ChatPanel.jsx's toggle) --
+  // threaded straight through to generateInProject(); the response's own
+  // "mode" field (see api.js/formatGenerateMeta) is what actually gets
+  // shown, since the backend can fall back to "full" regardless of what
+  // was requested (a project with no current version yet).
   const handleSend = useCallback(
-    async (prompt) => {
+    async (prompt, mode = "full") => {
       setMessages((prev) => [...prev, makeMessage("user", prompt)]);
       setIsLoading(true);
 
       try {
         const pid = await ensureProject();
-        const result = await generateInProject({ projectId: pid, prompt });
+        const result = await generateInProject({ projectId: pid, prompt, mode });
 
         if (result.success) {
           setJsonIr(result.json_ir);
