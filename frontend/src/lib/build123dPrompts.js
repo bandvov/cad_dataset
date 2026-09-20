@@ -12,13 +12,7 @@
 //   return null;
 // }
 export function findBuild123dPrompt(id) {
-  const prompt = BUILD123D_PROMPTS.find((item) => item.id === id);
-
-  if (prompt) {
-    return prompt;
-  }
-
-  return null;
+  return BUILD123D_PROMPTS.find((item) => item.id === id) ?? null;
 }
 
 export const BUILD123D_PROMPTS = [

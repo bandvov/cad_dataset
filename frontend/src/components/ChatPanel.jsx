@@ -24,19 +24,6 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
     }
   }, [messages, isLoading]);
 
-  function handlePromptChange(id) {
-    setSelectedPrompt(id);
-
-    if (!id) return;
-
-    const prompt = BUILD123D_PROMPTS.find((item) => item.id === id);
-    console.log({ prompt });
-
-    if (prompt) {
-      setInput(prompt.prompt);
-    }
-  }
-
   function handleSubmit(e) {
     e.preventDefault();
 
@@ -61,10 +48,10 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
 
     if (!id) return;
 
-    const prompt = findBuild123dPrompt(id);
+    const found = findBuild123dPrompt(id);
 
-    if (prompt) {
-      setInput(prompt.prompt);
+    if (found) {
+      setInput(found.prompt);
     }
   }
 
