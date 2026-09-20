@@ -1,4 +1,9 @@
 import { useState, useRef, useEffect } from "react";
+import Build123dPromptSelect from "./Build123dPromptSelect";
+import {
+  BUILD123D_PROMPTS,
+  findBuild123dPrompt,
+} from "../lib/build123dPrompts";
 
 export default function ChatPanel({ messages, onSend, isLoading }) {
   const [input, setInput] = useState("");
@@ -9,6 +14,8 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
   // not persisted, since whether an edit is additive varies message to
   // message.
   const [appendMode, setAppendMode] = useState(false);
+  const [selectedPrompt, setSelectedPrompt] = useState("");
+
   const listRef = useRef(null);
 
   useEffect(() => {
@@ -17,18 +24,47 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
     }
   }, [messages, isLoading]);
 
+  function handlePromptChange(id) {
+    setSelectedPrompt(id);
+
+    if (!id) return;
+
+    const prompt = BUILD123D_PROMPTS.find((item) => item.id === id);
+    console.log({ prompt });
+
+    if (prompt) {
+      setInput(prompt.prompt);
+    }
+  }
+
   function handleSubmit(e) {
     e.preventDefault();
-    const trimmed = input.trim();
+
+    const trimmed = input?.trim();
+
     if (!trimmed || isLoading) return;
+
     onSend(trimmed, appendMode ? "append" : "full");
+
     setInput("");
+    setSelectedPrompt("");
   }
 
   function handleKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit(e);
+    }
+  }
+  function handlePromptChange(id) {
+    setSelectedPrompt(id);
+
+    if (!id) return;
+
+    const prompt = findBuild123dPrompt(id);
+
+    if (prompt) {
+      setInput(prompt.prompt);
     }
   }
 
@@ -47,6 +83,7 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
             <div className="chat-message-role">
               {m.role === "user" ? "You" : "Assistant"}
             </div>
+
             <div className="chat-message-content">{m.content}</div>
             {/* elapsed time + prompt/completion token counts for this
                 generation, when available (see App.jsx's
@@ -58,37 +95,54 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
             {m.meta && <div className="chat-message-meta">{m.meta}</div>}
           </div>
         ))}
+
         {isLoading && (
           <div className="chat-message chat-message-assistant">
             <div className="chat-message-role">Assistant</div>
-            <div className="chat-message-content chat-typing">
-              Generating…
-            </div>
+
+            <div className="chat-message-content chat-typing">Generating…</div>
           </div>
         )}
       </div>
 
       <form className="chat-input-form" onSubmit={handleSubmit}>
+        <div className="chat-input-prompt-row">
+          <Build123dPromptSelect
+            value={selectedPrompt}
+            onChange={handlePromptChange}
+            disabled={isLoading}
+          />
+        </div>
+
         <textarea
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            setSelectedPrompt("");
+          }}
           onKeyDown={handleKeyDown}
           placeholder="Describe the part you want, or how to change it…"
           rows={3}
           disabled={isLoading}
         />
+
         <div className="chat-input-row">
           <div className="chat-input-left">
-            <span className="chat-input-hint">enter to send · shift+enter for newline</span>
+            <span className="chat-input-hint">
+              enter to send · shift+enter for newline
+            </span>
+
             <button
               type="button"
-              className={`chat-mode-toggle${appendMode ? " chat-mode-toggle-active" : ""}`}
+              className={`chat-mode-toggle${
+                appendMode ? " chat-mode-toggle-active" : ""
+              }`}
               onClick={() => setAppendMode((v) => !v)}
               disabled={isLoading}
               title={
                 appendMode
-                  ? "Append mode: the model generates only the new feature(s) to add (faster). Only use this for additions -- click to switch back to full regenerate for edits/removals."
-                  : "Full mode: the model regenerates the whole feature tree. Click to switch to append-only mode for pure additions (faster)."
+                  ? "Append mode: generate only new features"
+                  : "Full mode: regenerate the whole feature tree"
               }
             >
               {appendMode ? "⚡ Append only" : "Full regenerate"}
@@ -97,7 +151,7 @@ export default function ChatPanel({ messages, onSend, isLoading }) {
           <button
             type="submit"
             className="chat-send-btn"
-            disabled={isLoading || !input.trim()}
+            disabled={isLoading || !input}
           >
             Send
           </button>
