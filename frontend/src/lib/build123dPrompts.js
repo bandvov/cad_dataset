@@ -596,3 +596,299 @@ export const TRIANGULAR_OVAL_PROMPTS = [
       "Create a multi-step mounting flange with a rounded triangular outer profile and an oval central opening. Add a raised oval boss, four circular mounting holes, and triangular reinforcement ribs on three sides."
   },
 ];
+
+export const ADVANCED_PROFILE_PROMPTS = [
+  {
+    id: "trapezoid-extrusion",
+    name: "Extrude — Trapezoidal Profile",
+    prompt:
+      "Create a mechanical part from a trapezoidal sketch with a 70 mm bottom edge, 40 mm top edge, and 45 mm height. Extrude the profile 25 mm and add two circular mounting holes near the wider edge."
+  },
+
+  {
+    id: "asymmetric-trapezoid",
+    name: "Extrude — Asymmetric Trapezoid",
+    prompt:
+      "Create a solid from an asymmetric trapezoidal profile. The profile should have four unequal sides and one angled side steeper than the other. Extrude it 35 mm and add a through-hole near the center."
+  },
+
+  {
+    id: "trapezoid-pocket",
+    name: "Pocket — Trapezoidal",
+    prompt:
+      "Create a rectangular block and cut a trapezoidal pocket into the top face. The pocket should be 15 mm deep with the wider side at the opening."
+  },
+
+  {
+    id: "trapezoid-rib",
+    name: "Feature — Trapezoidal Rib",
+    prompt:
+      "Create a rectangular base plate and add a trapezoidal reinforcement rib. The rib should have a wide base, narrower top, and sloped side walls."
+  },
+
+  {
+    id: "pentagon-extrusion",
+    name: "Extrude — Pentagon",
+    prompt:
+      "Create a regular pentagonal plate by sketching a five-sided polygon and extruding it 15 mm. Add a central circular through-hole."
+  },
+
+  {
+    id: "irregular-pentagon",
+    name: "Extrude — Irregular Pentagon",
+    prompt:
+      "Create a mechanical mounting plate from an irregular five-sided profile with different edge lengths. Extrude it 20 mm and add three circular mounting holes."
+  },
+
+  {
+    id: "pentagon-pocket",
+    name: "Pocket — Pentagon",
+    prompt:
+      "Create a solid block and subtract a regular pentagonal pocket from its top face. The pocket should be 12 mm deep."
+  },
+
+  {
+    id: "hexagon-extrusion",
+    name: "Extrude — Hexagonal Profile",
+    prompt:
+      "Create a hexagonal mechanical plate using a regular hexagonal sketch and extrude it 20 mm. Add a central circular bore and six smaller mounting holes around it."
+  },
+
+  {
+    id: "hexagonal-boss",
+    name: "Boss — Hexagonal",
+    prompt:
+      "Create a rectangular base plate with a raised hexagonal boss on its top face. Extrude the hexagonal boss 15 mm and cut a circular through-hole through its center."
+  },
+
+  {
+    id: "hexagonal-pattern",
+    name: "Pattern — Hexagonal Bosses",
+    prompt:
+      "Create a circular plate with one hexagonal mounting boss near its perimeter. Circular-pattern the boss 6 times around the central axis."
+  },
+
+  {
+    id: "hexagonal-pocket",
+    name: "Pocket — Hexagonal",
+    prompt:
+      "Create a cylindrical block and cut a hexagonal pocket into its top face. The pocket should be 10 mm deep and centered on the cylinder."
+  },
+
+  {
+    id: "star-extrusion",
+    name: "Extrude — Star Profile",
+    prompt:
+      "Create a five-point star-shaped plate using a sketch with alternating outer and inner vertices. Extrude it 10 mm and add a central circular hole."
+  },
+
+  {
+    id: "star-pocket",
+    name: "Pocket — Star",
+    prompt:
+      "Create a rectangular block and subtract a five-point star-shaped pocket from its top face. The pocket should be 8 mm deep."
+  },
+
+  {
+    id: "star-boss",
+    name: "Boss — Star-shaped",
+    prompt:
+      "Create a circular base and add a raised five-point star-shaped boss on the top face. Extrude the star 12 mm."
+  },
+
+  {
+    id: "six-point-star",
+    name: "Extrude — Six-point Star",
+    prompt:
+      "Create a six-point star profile from twelve alternating inner and outer vertices and extrude it 15 mm. Add a circular through-hole at the center."
+  },
+
+  {
+    id: "arc-profile",
+    name: "Extrude — Arc-based Profile",
+    prompt:
+      "Create a mechanical plate from a closed profile containing two large tangent arcs connected by straight segments. Extrude the profile 20 mm and add two mounting holes."
+  },
+
+  {
+    id: "multi-radius-profile",
+    name: "Extrude — Multi-radius Profile",
+    prompt:
+      "Create a closed mechanical profile using four straight segments and four arcs with different radii. The profile should have rounded corners of varying sizes. Extrude it 25 mm."
+  },
+
+  {
+    id: "semicircle-profile",
+    name: "Extrude — Semicircular Profile",
+    prompt:
+      "Create a D-shaped mechanical plate using a rectangle connected to a semicircular end. Extrude the profile 15 mm and add two circular mounting holes."
+  },
+
+  {
+    id: "double-arc-profile",
+    name: "Extrude — Double Arc",
+    prompt:
+      "Create a long curved mounting plate using two concentric arcs connected at both ends. Extrude the resulting curved ring profile 12 mm and add four mounting holes."
+  },
+
+  {
+    id: "keyhole-profile",
+    name: "Extrude — Keyhole Profile",
+    prompt:
+      "Create a keyhole-shaped plate consisting of a circular region connected to a narrow rectangular neck. Extrude the combined profile 15 mm and add a small through-hole in the rectangular section."
+  },
+
+  {
+    id: "shield-profile",
+    name: "Extrude — Shield Profile",
+    prompt:
+      "Create a shield-shaped mechanical plate using straight upper edges, angled side edges, and a pointed bottom. Extrude it 18 mm and add two circular mounting holes near the top."
+  },
+
+  {
+    id: "arrow-profile",
+    name: "Extrude — Arrow Profile",
+    prompt:
+      "Create an arrow-shaped plate using a rectangular shaft and two angled edges forming the arrowhead. Extrude the complete closed profile 12 mm."
+  },
+
+  {
+    id: "cross-profile",
+    name: "Extrude — Cross Profile",
+    prompt:
+      "Create a cross-shaped plate from a single closed sketch consisting of multiple horizontal and vertical segments. Extrude it 15 mm and add a central circular hole."
+  },
+
+  {
+    id: "plus-with-holes",
+    name: "Extrude — Cross with Holes",
+    prompt:
+      "Create a plus-shaped mechanical plate and add one circular hole at the end of each of its four arms. Extrude the complete profile 10 mm."
+  },
+
+  {
+    id: "octagon-profile",
+    name: "Extrude — Octagonal Profile",
+    prompt:
+      "Create an octagonal mounting plate by sketching an eight-sided profile with chamfered corners. Extrude it 20 mm and add a central bore plus four mounting holes."
+  },
+
+  {
+    id: "octagon-pocket",
+    name: "Pocket — Octagonal",
+    prompt:
+      "Create a rectangular block with a centered octagonal pocket. Cut the pocket 12 mm deep and add a smaller circular through-hole at its bottom."
+  },
+
+  {
+    id: "irregular-polygon",
+    name: "Extrude — Irregular Polygon",
+    prompt:
+      "Create a complex mechanical plate from an irregular seven-sided polygon. Use different edge lengths and several angled edges. Extrude it 20 mm and add three circular mounting holes."
+  },
+
+  {
+    id: "polygon-with-slot",
+    name: "Extrude — Polygon + Slot",
+    prompt:
+      "Create an irregular hexagonal mounting plate containing a centered elongated slot and four circular mounting holes. Extrude the entire sketch 15 mm."
+  },
+
+  {
+    id: "polygon-boss-pattern",
+    name: "Pattern — Polygon Boss",
+    prompt:
+      "Create a circular base with one pentagonal boss positioned near the outer edge. Circular-pattern the pentagonal boss 5 times around the center."
+  },
+
+  {
+    id: "mixed-arc-polygon",
+    name: "Extrude — Mixed Arc Polygon",
+    prompt:
+      "Create a complex closed sketch combining straight edges, a semicircle, two tangent arcs, and angled edges. Extrude the resulting profile 25 mm."
+  },
+
+  {
+    id: "rounded-hexagon",
+    name: "Extrude — Rounded Hexagon",
+    prompt:
+      "Create a rounded hexagonal plate where each corner is replaced by a tangent arc. Extrude the profile 15 mm and add a central circular bore."
+  },
+
+  {
+    id: "triangle-hexagon-loft",
+    name: "Loft — Triangle to Hexagon",
+    prompt:
+      "Create a solid loft between a triangular profile at z=0, a pentagonal profile at z=30, and a hexagonal profile at z=60. Keep all profiles centered on the same vertical axis."
+  },
+
+  {
+    id: "star-to-circle-loft",
+    name: "Loft — Star to Circle",
+    prompt:
+      "Create a smooth transition by lofting from a five-point star profile at z=0 to a circular profile with 30 mm diameter at z=50."
+  },
+
+  {
+    id: "trapezoid-to-oval-loft",
+    name: "Loft — Trapezoid to Oval",
+    prompt:
+      "Create a transition body by lofting from a 60 mm wide trapezoidal profile at z=0 to an oval profile measuring 40x20 mm at z=50."
+  },
+
+  {
+    id: "polygon-sweep",
+    name: "Sweep — Polygon Profile",
+    prompt:
+      "Sweep a regular hexagonal profile along a curved 3D path consisting of straight segments and two tangent arcs. Create a continuous solid pipe-like structure."
+  },
+
+  {
+    id: "triangle-sweep",
+    name: "Sweep — Triangular Profile",
+    prompt:
+      "Sweep a triangular profile along an S-shaped path. Keep the triangular profile oriented perpendicular to the path and create a continuous curved structural member."
+  },
+
+  {
+    id: "oval-sweep-pattern",
+    name: "Sweep — Oval + Pattern",
+    prompt:
+      "Sweep an oval profile along a curved path to create a tubular feature, then create three translated copies using a linear pattern."
+  },
+
+  {
+    id: "complex-profile-mirror",
+    name: "Mirror — Complex Profile",
+    prompt:
+      "Create an asymmetric profile containing arcs, angled edges, and a triangular section. Extrude it to form a mounting feature, then mirror the complete feature across the central YZ plane."
+  },
+
+  {
+    id: "complex-profile-pattern",
+    name: "Pattern — Complex Profile",
+    prompt:
+      "Create one irregular polygonal mounting boss containing a circular hole and a triangular reinforcement. Circular-pattern the complete feature 6 times around the center."
+  },
+
+  {
+    id: "flange-polygon",
+    name: "Multi-step — Polygon Flange",
+    prompt:
+      "Create a flange with an octagonal outer profile and circular center bore. Add a raised cylindrical boss, cut the bore through the boss, create one mounting hole, circular-pattern it 6 times, and chamfer the outer edges."
+  },
+
+  {
+    id: "complex-profile-bracket",
+    name: "Multi-step — Polygon Bracket",
+    prompt:
+      "Create a mounting bracket from an irregular pentagonal profile. Extrude the profile, add a triangular reinforcement rib, mirror the rib, cut an oval slot, create two circular mounting holes, and finish the outer edges with fillets."
+  },
+
+  {
+    id: "complex-multi-profile",
+    name: "Complex — Multiple Profiles",
+    prompt:
+      "Create a mechanical component using multiple profile types: an octagonal base, a raised oval boss, a triangular reinforcement rib, and a pentagonal mounting feature. Add circular holes and fillet the external edges."
+  },
+];
