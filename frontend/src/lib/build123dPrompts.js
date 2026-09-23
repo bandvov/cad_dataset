@@ -398,3 +398,201 @@ export const SHELL_SUBSIQUENT_FEATURES_PROMPTS = [
       "Create a cylindrical housing, shell it with 3 mm wall thickness, then create an external flange around the bottom opening. Add six equally spaced bolt holes to the flange.",
   },
 ];
+
+export const TRIANGULAR_OVAL_PROMPTS = [
+  {
+    id: "extrude-triangle",
+    name: "Extrude — Triangular Profile",
+    prompt:
+      "Create a triangular mechanical plate by sketching an equilateral triangular profile on the XY plane and extruding it 15 mm. Add a circular through-hole near the center."
+  },
+
+  {
+    id: "extrude-asymmetric-triangle",
+    name: "Extrude — Asymmetric Triangle",
+    prompt:
+      "Create a mechanical wedge from an asymmetric triangular profile with three different side lengths. Extrude the profile 40 mm and add two mounting holes near the wider end."
+  },
+
+  {
+    id: "extrude-rounded-triangle",
+    name: "Extrude — Rounded Triangle",
+    prompt:
+      "Create a rounded triangular plate using three tangent arcs connected by three straight segments. Extrude the closed profile 12 mm and add a central circular through-hole."
+  },
+
+  {
+    id: "triangle-rib",
+    name: "Feature — Triangular Rib",
+    prompt:
+      "Create a rectangular base plate and add a triangular reinforcement rib along its length. The rib should have a sloped top edge and be fused to the base plate."
+  },
+
+  {
+    id: "triangle-rib-pattern",
+    name: "Pattern — Triangular Ribs",
+    prompt:
+      "Create a rectangular structural plate with one triangular reinforcement rib. Create a linear pattern of 5 identical ribs across the width with equal spacing."
+  },
+
+  {
+    id: "triangle-cut",
+    name: "Cut — Triangular Pocket",
+    prompt:
+      "Create a rectangular block and cut a triangular pocket into its top face. The triangular pocket should have two equal sides and be 12 mm deep."
+  },
+
+  {
+    id: "triangle-through-cut",
+    name: "Cut — Triangular Opening",
+    prompt:
+      "Create a rectangular plate with a triangular through-opening near one end. Use a triangular sketch and subtract it completely through the plate."
+  },
+
+  {
+    id: "triangle-boss",
+    name: "Boss — Triangular",
+    prompt:
+      "Create a rectangular base and add a raised triangular boss with rounded corners. Extrude the triangular profile 20 mm from the top face."
+  },
+
+  {
+    id: "triangle-mirror",
+    name: "Mirror — Triangular Features",
+    prompt:
+      "Create a rectangular plate with a triangular mounting boss on the left side. Mirror the triangular boss across the central YZ plane to create a symmetric pair."
+  },
+
+  {
+    id: "triangle-circular-pattern",
+    name: "Pattern — Triangular Features",
+    prompt:
+      "Create a circular base with one triangular reinforcement feature near its outer edge. Circular-pattern the triangular feature 6 times around the central Z axis."
+  },
+
+  {
+    id: "oval-profile",
+    name: "Extrude — Oval Profile",
+    prompt:
+      "Create an oval mechanical plate by sketching an ellipse with a major axis of 80 mm and minor axis of 40 mm. Extrude it 12 mm and add a centered circular through-hole."
+  },
+
+  {
+    id: "oval-hole",
+    name: "Cut — Oval Hole",
+    prompt:
+      "Create a rectangular mounting plate and cut an elongated oval through-hole through the center. The opening should have a major axis of 60 mm and minor axis of 20 mm."
+  },
+
+  {
+    id: "oval-boss",
+    name: "Boss — Oval",
+    prompt:
+      "Create a rectangular base plate and add an oval-shaped raised boss on its top face. The boss should be 60 mm long, 30 mm wide, and 10 mm high."
+  },
+
+  {
+    id: "oval-pocket",
+    name: "Pocket — Oval Cavity",
+    prompt:
+      "Create a rectangular block with a deep oval pocket on the top face. The pocket should have a 70 mm major axis, 35 mm minor axis, and 15 mm depth."
+  },
+
+  {
+    id: "concentric-oval",
+    name: "Sketch — Concentric Ovals",
+    prompt:
+      "Create an oval ring by sketching two concentric ellipses with different major and minor axes. Extrude the region between them 15 mm to create an oval-shaped ring."
+  },
+
+  {
+    id: "oval-flange",
+    name: "Multi-step — Oval Flange",
+    prompt:
+      "Create an oval flange in multiple steps: extrude an oval base profile, add a smaller raised oval boss, cut a central oval opening, then create four circular mounting holes near the outer perimeter."
+  },
+
+  {
+    id: "oval-pattern",
+    name: "Pattern — Oval Slots",
+    prompt:
+      "Create a rectangular mounting plate with one elongated oval slot. Create a linear pattern of 4 identical oval slots along the X axis with 20 mm spacing."
+  },
+
+  {
+    id: "oval-mirror",
+    name: "Mirror — Oval Bosses",
+    prompt:
+      "Create a rectangular plate with an oval boss near the left side. Mirror the complete oval boss feature across the YZ plane to create an identical boss on the right side."
+  },
+
+  {
+    id: "oval-loft",
+    name: "Loft — Oval Transition",
+    prompt:
+      "Create a tapered transition using three oval profiles at different Z heights. Start with an 80x40 mm ellipse, transition to a 60x30 mm ellipse, and finish with a 40x20 mm ellipse."
+  },
+
+  {
+    id: "triangle-to-oval-loft",
+    name: "Loft — Triangle to Oval",
+    prompt:
+      "Create a complex transition by lofting from a triangular profile at z=0 to an oval profile at z=50. Keep both profiles centered on the same Z axis and create a smooth solid transition."
+  },
+
+  {
+    id: "oval-sweep",
+    name: "Sweep — Oval Profile",
+    prompt:
+      "Create a curved duct by sweeping an oval profile along an S-shaped 3D path. Use an ellipse with a 30 mm major axis and 15 mm minor axis as the sweep profile."
+  },
+
+  {
+    id: "triangle-loft",
+    name: "Loft — Triangular Profiles",
+    prompt:
+      "Create a tapered triangular structure by lofting between three triangular profiles at different Z heights. The bottom triangle should be 60 mm wide, the middle 45 mm wide, and the top 25 mm wide."
+  },
+
+  {
+    id: "triangle-to-circle",
+    name: "Loft — Triangle to Circle",
+    prompt:
+      "Create a transition duct by lofting from a 60 mm wide triangular profile at the bottom to a 30 mm diameter circular profile at the top."
+  },
+
+  {
+    id: "oval-revolve",
+    name: "Revolve — Oval-derived Profile",
+    prompt:
+      "Create a rotational mechanical component using a cross-section containing curved and elliptical-style geometry, then revolve the profile 360 degrees around the Z axis. Add a central bore afterward."
+  },
+
+  {
+    id: "oval-bolt-pattern",
+    name: "Oval Flange — Bolt Pattern",
+    prompt:
+      "Create an oval flange with a central oval opening. Add one circular mounting hole near one end and create a mirrored pair at both ends. Add another pair along the opposite side."
+  },
+
+  {
+    id: "triangle-slot-pattern",
+    name: "Pattern — Triangular Slots",
+    prompt:
+      "Create a rectangular plate with one triangular through-slot having rounded corners. Create a linear pattern of 4 identical slots along the X axis."
+  },
+
+  {
+    id: "triangle-oval-bracket",
+    name: "Complex — Triangle + Oval",
+    prompt:
+      "Create a mounting bracket from a complex triangular outer profile with rounded corners. Add an oval through-hole near the center, two circular mounting holes near the base, and a triangular reinforcement rib on the rear."
+  },
+
+  {
+    id: "triangle-oval-flange",
+    name: "Complex — Triangular Oval Flange",
+    prompt:
+      "Create a multi-step mounting flange with a rounded triangular outer profile and an oval central opening. Add a raised oval boss, four circular mounting holes, and triangular reinforcement ribs on three sides."
+  },
+];
