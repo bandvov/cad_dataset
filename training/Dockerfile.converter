@@ -1,0 +1,16 @@
+FROM ghcr.io/ggml-org/llama.cpp:full
+
+USER root
+
+FROM ghcr.io/ggml-org/llama.cpp:full-cuda
+
+RUN python3 -m pip install --no-cache-dir --upgrade \
+    "transformers>=5.0.0" \
+    sentencepiece \
+    protobuf \
+    safetensors \
+    huggingface_hub
+
+WORKDIR /llama.cpp
+
+ENTRYPOINT []

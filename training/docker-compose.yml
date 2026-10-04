@@ -99,6 +99,36 @@ services:
       - "--new-adapter=${NEW_ADAPTER:-/workspace/outputs/adapter}"
       - "--eval-prompts=/workspace/data/val.jsonl"
       - "--n-samples=${COMPARE_N_SAMPLES:-50}"
+  # gemma4-converter:
+  #   image: ghcr.io/ggml-org/llama.cpp:full-cuda
+  #   container_name: gemma4-converter
+
+  #   volumes:
+  #     - ../training/outputs/merged:/models/input:ro
+  #     - ./models:/models/output
+
+  #   working_dir: /app
+
+  #   entrypoint: ["/bin/bash", "-c"]
+
+  #   command:
+  #     - |
+  #       set -e
+
+  #       echo "Searching for converter..."
+  #       CONVERTER=$$(find / -name convert_hf_to_gguf.py 2>/dev/null | head -n 1)
+
+  #       if [ -z "$$CONVERTER" ]; then
+  #         echo "ERROR: convert_hf_to_gguf.py not found"
+  #         exit 1
+  #       fi
+
+  #       echo "Using converter: $$CONVERTER"
+
+  #       python3 "$$CONVERTER" \
+  #         /models/input \
+  #         --outfile /models/gemma-4-E2B-it-cad-f16.gguf \
+  #         --outtype f16    
 
 volumes:
   hf_cache:
