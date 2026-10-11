@@ -358,7 +358,7 @@ class GeometryEvalCallback(TrainerCallback):
                     return_tensors="pt", return_dict=True,
                 ).to(device)
                 out = self.model.generate(
-                    **inputs, max_new_tokens=800, do_sample=False,
+                    **inputs, max_new_tokens=2000, do_sample=False,
                     pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
                 )
                 prompt_len = inputs["input_ids"].shape[1]

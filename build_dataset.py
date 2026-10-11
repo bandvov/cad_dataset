@@ -26,6 +26,7 @@ import os
 import random
 import sys
 import time
+from typing import Counter
 
 import gen_single_feature
 import gen_chains
@@ -36,7 +37,7 @@ import chat_format
 
 
 def verify_records(records: list[dict], be: BatchExecutor | None, skip: bool,
-                    label: str = "") -> tuple[list[dict], list[dict]]:
+                   label: str = "") -> tuple[list[dict], list[dict]]:
     verified, quarantined = [], []
     n = len(records)
     start = time.time()
@@ -53,13 +54,13 @@ def verify_records(records: list[dict], be: BatchExecutor | None, skip: bool,
         else:
             rec["verified"] = False
             rec["verification_error"] = {"error_type": result.get("error_type"),
-                                        "error": result.get("error")}
+                                         "error": result.get("error")}
             quarantined.append(rec)
         if not skip and ((i + 1) % 20 == 0 or i + 1 == n):
             elapsed = time.time() - start
             rate = (i + 1) / elapsed if elapsed > 0 else 0
             print(f"   [{label}] {i + 1}/{n}  ({rate:.1f} rec/s, {elapsed:.0f}s elapsed)",
-                flush=True)
+                  flush=True)
     return verified, quarantined
 
 
@@ -88,6 +89,76 @@ def structure_hash(ir: dict) -> str:
     dimension variants of the same tree."""
     sig = [(f["feature_type"], f.get("operation")) for f in ir["features"]]
     return hashlib.sha1(json.dumps(sig).encode()).hexdigest()
+
+
+def _vec_sig(v, default=None):
+    """Rounded vector signature; None coords stay None. Direction/normal
+    only, never positions, so dimensional variants still share a bucket."""
+    if not isinstance(v, (list, tuple)):
+        return default
+    return tuple(None if c is None else round(float(c), 3) for c in v)
+
+
+def _selector_sig(sel) -> tuple | None:
+    """Which KIND of selection this is (axis+criterion, geom type, or which
+    near_point axes are constrained), never the numeric point/tolerance."""
+    if not isinstance(sel, dict):
+        return None
+    fb = sel.get("filter_by")
+    sig = [sel.get("of"), fb]
+    if fb in ("X", "Y", "Z", "all", None):
+        sig.append(sel.get("criterion"))
+    elif fb == "GeomType":
+        sig.append(sel.get("geom_type"))
+    elif fb == "near_point":
+        # which coords are null (unconstrained) is the behavior being taught
+        sig.append(tuple(c is None for c in (sel.get("point") or [])))
+    return tuple(sig)
+
+
+def _feature_signature(f: dict) -> tuple:
+    t = f["feature_type"]
+    sig: list = [t, f.get("operation")]
+    if t == "Sketch":
+        plane = f.get("plane")
+        normal = _vec_sig(plane.get("normal"), (0.0, 0.0, 1.0)) if isinstance(
+            plane, dict) else (0.0, 0.0, 1.0)
+        sig.append(normal)
+        sig.append(tuple((p.get("type"), p.get("parameters", {}).get("mode", "ADD"))
+                         for p in f.get("primitives", [])))
+    elif t in ("Fillet", "Chamfer"):
+        sig.append(_selector_sig(f.get("selector")))
+    elif t == "Shell":
+        sig.append(_selector_sig(f.get("open_selector")))
+    elif t == "Hole":
+        loc = f.get("location") or {}
+        sig += [f.get("style"), _vec_sig(loc.get("normal"), (0.0, 0.0, -1.0))]
+    elif t == "Mirror":
+        sig.append(f.get("plane"))
+    elif t == "LinearPattern":
+        sig.append(_vec_sig(f.get("direction")))
+    elif t == "CircularPattern":
+        sig.append(_vec_sig((f.get("axis") or {}).get(
+            "direction"), (0.0, 0.0, 1.0)))
+    elif t == "Revolve":
+        sig.append(_vec_sig((f.get("axis") or {}).get(
+            "direction"), (0.0, 1.0, 0.0)))
+    elif t == "Loft":
+        sig += [len(f.get("sources", [])), bool(f.get("ruled", False))]
+    elif t == "Sweep":
+        sig.append(bool(f.get("is_frenet", False)))
+    return tuple(sig)
+
+
+def family_hash(ir: dict) -> str:
+    """Finer-grained than structure_hash(): same feature-type sequence AND
+    same *kind* of plane / selector / hole normal / mirror plane / pattern
+    axis. Still ignores all numeric dimensions, so dimensional variants of
+    one design share a bucket (that's what the per-bucket cap is for), but
+    a Z/max fillet and an X/min fillet, or a sketch on XY vs YZ, no longer
+    compete for the same 8 slots."""
+    sig = [_feature_signature(f) for f in ir["features"]]
+    return hashlib.sha1(json.dumps(sig, default=str).encode()).hexdigest()
 
 
 def to_chat_format(rec: dict) -> dict:
@@ -153,7 +224,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     print("== generating single-feature records ==", flush=True)
-    single = gen_single_feature.generate(args.n_single_per_type, seed=args.seed)
+    single = gen_single_feature.generate(
+        args.n_single_per_type, seed=args.seed)
     print(f"   {len(single)} candidates generated", flush=True)
     print("== generating chain records ==", flush=True)
     chains = gen_chains.generate(args.n_chains, seed=args.seed)
@@ -164,14 +236,19 @@ def main():
     try:
         print("== verifying single-feature records "
               "(first batch pays a one-time build123d import cost, ~seconds) ==", flush=True)
-        single_ok, single_bad = verify_records(single, be, args.skip_verification, label="single")
-        print(f"   {len(single_ok)} verified, {len(single_bad)} quarantined", flush=True)
+        single_ok, single_bad = verify_records(
+            single, be, args.skip_verification, label="single")
+        print(
+            f"   {len(single_ok)} verified, {len(single_bad)} quarantined", flush=True)
         print("== verifying chain records ==", flush=True)
-        chains_ok, chains_bad = verify_records(chains, be, args.skip_verification, label="chains")
-        print(f"   {len(chains_ok)} verified, {len(chains_bad)} quarantined", flush=True)
+        chains_ok, chains_bad = verify_records(
+            chains, be, args.skip_verification, label="chains")
+        print(
+            f"   {len(chains_ok)} verified, {len(chains_bad)} quarantined", flush=True)
 
         write_jsonl(f"{args.out_dir}/single_feature.verified.jsonl", single_ok)
-        write_jsonl(f"{args.out_dir}/single_feature.quarantine.jsonl", single_bad)
+        write_jsonl(
+            f"{args.out_dir}/single_feature.quarantine.jsonl", single_bad)
         write_jsonl(f"{args.out_dir}/chains.verified.jsonl", chains_ok)
         write_jsonl(f"{args.out_dir}/chains.quarantine.jsonl", chains_bad)
 
@@ -187,7 +264,8 @@ def main():
             for i, rec in enumerate(pool_copy):
                 if len(repair_records) >= args.n_repair:
                     break
-                r = gen_repair.make_repair_record(rec, rng, args.timeout, execute_fn=execute_fn)
+                r = gen_repair.make_repair_record(
+                    rec, rng, args.timeout, execute_fn=execute_fn)
                 if r:
                     repair_records.append(r)
                 if (i + 1) % 20 == 0:
@@ -206,12 +284,16 @@ def main():
             # regenerate outputs also need verification -- the edited IR could
             # push a formula-derived value out of bounds (e.g. shell thickness
             # after a big resize)
-            regen_ok, regen_bad = verify_records(regen_records, be, False, label="regenerate")
-            print(f"   {len(regen_ok)} verified, {len(regen_bad)} quarantined", flush=True)
-            write_jsonl(f"{args.out_dir}/regenerate.quarantine.jsonl", regen_bad)
+            regen_ok, regen_bad = verify_records(
+                regen_records, be, False, label="regenerate")
+            print(
+                f"   {len(regen_ok)} verified, {len(regen_bad)} quarantined", flush=True)
+            write_jsonl(
+                f"{args.out_dir}/regenerate.quarantine.jsonl", regen_bad)
             regen_records = regen_ok
         else:
-            print("== skipping repair/regenerate verification (--skip-verification) ==", flush=True)
+            print(
+                "== skipping repair/regenerate verification (--skip-verification) ==", flush=True)
     finally:
         if be is not None:
             be.__exit__(None, None, None)
@@ -230,7 +312,8 @@ def main():
                   f"without verified=true", flush=True)
         flywheel_records.extend(ok)
     if flywheel_records:
-        print(f"== including {len(flywheel_records)} verified flywheel records ==", flush=True)
+        print(
+            f"== including {len(flywheel_records)} verified flywheel records ==", flush=True)
 
     # ---- dedupe + family-based split + chat format ----
     all_records = generate_pool + repair_records + regen_records + flywheel_records
@@ -241,6 +324,15 @@ def main():
     deduped = []
     n_exact_dupes = n_bucket_capped = 0
 
+    old_b = len({(r["task_type"], structure_hash(r["json_ir"]))
+                for r in all_records})
+    new_b = len({(r["task_type"], family_hash(r["json_ir"]))
+                for r in all_records})
+    print(f"== buckets: {old_b} by feature-type sequence only -> {new_b} by family "
+          f"(cap {args.max_per_bucket} each => ceiling {old_b * args.max_per_bucket} -> "
+          f"{new_b * args.max_per_bucket} records) ==")
+    
+
     for r in all_records:
         task = r["task_type"]
 
@@ -250,7 +342,7 @@ def main():
             continue
         seen_content.add(c_key)
 
-        s_key = (task, structure_hash(r["json_ir"]))
+        s_key = (task, family_hash(r["json_ir"]))
         count = bucket_counts.get(s_key, 0)
         if count >= args.max_per_bucket:
             n_bucket_capped += 1
@@ -259,8 +351,8 @@ def main():
         deduped.append(r)
 
     print(f"== {len(all_records)} total: {n_exact_dupes} exact duplicates, "
-        f"{n_bucket_capped} over per-bucket cap ({args.max_per_bucket}), "
-        f"{len(deduped)} kept ==")
+          f"{n_bucket_capped} over per-bucket cap ({args.max_per_bucket}), "
+          f"{len(deduped)} kept ==")
 
     def split_bucket(record_id: str) -> str:
         h = int(hashlib.sha1(record_id.encode()).hexdigest(), 16)
@@ -269,6 +361,38 @@ def main():
     train, val = [], []
     for r in deduped:
         (val if split_bucket(r["record_id"]) == "val" else train).append(r)
+
+    fam_total = Counter((r["task_type"], family_hash(r["json_ir"]))
+                        for r in all_records)
+    sizes = sorted(fam_total.values(), reverse=True)
+    print(f"== family sizes: top 10 = {sizes[:10]}")
+    print(f"   {sum(1 for s in sizes if s == 1)} families with 1 record, "
+        f"{sum(1 for s in sizes if s <= 3)} with <=3, "
+        f"{sum(1 for s in sizes if s > args.max_per_bucket)} saturated (>cap)")
+    by_src = Counter(r["record_id"].split("_")[0] for r in all_records)
+    print(f"   candidates by generator: {dict(by_src)}")
+    
+    print("="*80)
+
+    beh = Counter()
+    
+    for r in deduped:
+        for f in r["json_ir"]["features"]:
+            t = f["feature_type"]
+            if t == "Sketch":
+                n = (f.get("plane") or {}).get("normal", [0, 0, 1])
+                beh[("sketch_normal", tuple(n))] += 1
+            elif t in ("Fillet", "Chamfer"):
+                s = f["selector"]
+                beh[(t, s.get("filter_by"), s.get("criterion") or s.get("geom_type")
+                    or tuple(c is None for c in s.get("point", [])))] += 1
+            elif t == "Hole":
+                beh[("hole_normal", tuple(f["location"].get("normal", [])))] += 1
+            elif t == "Mirror":
+                beh[("mirror_plane", f.get("plane"))] += 1
+                
+    for k, v in sorted(beh.items(), key=lambda kv: kv[1]):
+        print(f"{v:5d}  {k}")    
 
     train_chat = [to_chat_format(r) for r in train]
     val_chat = [to_chat_format(r) for r in val]
@@ -279,7 +403,8 @@ def main():
     write_jsonl(f"{args.out_dir}/train.full.jsonl", train)
     write_jsonl(f"{args.out_dir}/val.full.jsonl", val)
 
-    print(f"== wrote {len(train_chat)} train / {len(val_chat)} val chat records to {args.out_dir}/ ==")
+    print(
+        f"== wrote {len(train_chat)} train / {len(val_chat)} val chat records to {args.out_dir}/ ==")
 
 
 if __name__ == "__main__":

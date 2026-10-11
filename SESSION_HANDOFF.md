@@ -12,7 +12,7 @@ everything needed to continue in a fresh conversation.
 - `executor.py` — subprocess isolation; `execute_ir()` one-shot, `BatchExecutor` persistent-worker pool (avoids per-call OCP import cost)
 - `validator.py` — geometric sanity checks (manifold, volume>0, etc.)
 - `gen_single_feature.py` / `gen_chains.py` / `gen_repair.py` / `gen_regenerate.py` — synthetic data generators for the 4 task types
-- `build_dataset.py` — orchestrates generation → verify → dedupe (`structure_hash`) → split → chat-format (`to_chat_format`, `prompt`/`completion` shape); `--include-flywheel-data` flag merges verified flywheel records in
+- `build_dataset.py` — orchestrates generation → verify → dedupe (`family_hash`) → split → chat-format (`to_chat_format`, `prompt`/`completion` shape); `--include-flywheel-data` flag merges verified flywheel records in
 - `chat_format.py` — shared turn-rendering (`render_generate_user_turn` etc.), used by both `build_dataset.py` (training) and `llm-service/orchestrator.py` (inference) so wording can't drift between train/serve
 - `primitives.py` — parameter samplers, safe ranges
 - `stub_build123d/` — fake build123d for plumbing tests when a real install isn't available
@@ -46,7 +46,7 @@ everything needed to continue in a fresh conversation.
 2. `mine_flywheel_repairs.py` — walks retry chains to eventual fix
 3. `mine_flywheel_edits.py` — pairs "edited" events, synthesizes instruction via IR diff
 4. `mine_flywheel_verify.py` — re-verifies via `BatchExecutor`, quarantines drift
-5. `mine_flywheel_dedup.py` — dedupes against corpus via `build_dataset.structure_hash`
+5. `mine_flywheel_dedup.py` — dedupes against corpus via `build_dataset.family_hash`
 7. `build_dataset.py --include-flywheel-data` — merge point, consumes step 5's output directly, re-checks `verified:true` itself, does its own chat-format conversion
 8. `mine_flywheel_gate.py` — count thresholds, exit 0/1
 

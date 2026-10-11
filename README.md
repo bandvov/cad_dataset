@@ -82,7 +82,7 @@ mine_flywheel_edits.py flywheel step 3: "edited" events paired with the manual
                        apply that followed them -> regenerate records
 mine_flywheel_verify.py  flywheel step 4: re-run pairs through real build123d,
                        mark verified true / quarantine drift
-mine_flywheel_dedup.py flywheel step 5: dedup vs. corpus via structure_hash
+mine_flywheel_dedup.py flywheel step 5: dedup vs. corpus via family_hash
 mine_flywheel_gate.py  flywheel volume/quality gate, exit 0/1 (retraining trigger)
 mine_repair_pairs.py   earlier pre-auth repair-pair miner -- superseded by the
                        --auth-token scripts above (relevant only if you hit
@@ -259,8 +259,8 @@ python mine_flywheel_dedup.py --corpus out/train.full.jsonl out/val.full.jsonl \
     --out out/flywheel_deduped.jsonl
 
 # 7. merge into the next dataset build (re-checks verified=true itself)
-python build_dataset.py --n-single-per-type 300 --n-chains 3000 \
-    --n-repair 1500 --n-regenerate 1500 --out-dir out \
+python build_dataset.py --n-single-per-type 60 --n-chains 6000 \
+       --n-repair 2500 --n-regenerate 2500 --out-dir out \
     --include-flywheel-data out/flywheel_deduped.jsonl
 
 # 8. volume gate -- exit 1 if below threshold

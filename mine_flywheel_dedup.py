@@ -1,8 +1,8 @@
 """
 mine_flywheel_dedup.py
 Phase 4 step 5: dedup verified flywheel records against the existing
-training corpus, reusing build_dataset.py's own structure_hash()
-(feature_type+operation sequence) so "collides with existing data" means
+training corpus, reusing build_dataset.py's own family_hash()
+(feature_type+family) so "collides with existing data" means
 the same thing here as everywhere else in this pipeline.
 
 Usage:
@@ -17,7 +17,7 @@ import argparse
 import json
 import os
 
-from build_dataset import structure_hash
+from build_dataset import family_hash
 
 
 def load_jsonl(path: str) -> list[dict]:
@@ -31,14 +31,14 @@ def existing_hashes(corpus_paths: list[str]) -> set[tuple[str, str]]:
         if not os.path.exists(path):
             continue
         for r in load_jsonl(path):
-            seen.add((r["task_type"], structure_hash(r["json_ir"])))
+            seen.add((r["task_type"], family_hash(r["json_ir"])))
     return seen
 
 
 def dedup(candidates: list[dict], seen: set[tuple[str, str]]) -> tuple[list[dict], list[dict]]:
     kept, dropped = [], []
     for r in candidates:
-        key = (r["task_type"], structure_hash(r["json_ir"]))
+        key = (r["task_type"], family_hash(r["json_ir"]))
         if key in seen:
             dropped.append(r)
         else:
